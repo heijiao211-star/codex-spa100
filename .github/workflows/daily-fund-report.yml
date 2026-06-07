@@ -24,3 +24,11 @@ jobs:
 
       - name: Send report
         run: python daily_fund_report.py --send
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fund-report
+          path: reports/*.html
+          if-no-files-found: ignore

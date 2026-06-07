@@ -907,6 +907,86 @@ def build_report(items, benchmarks, config):
 </html>"""
 
 
+def build_pushplus_report(items, config):
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    title = config.get("title", "美股指数基金定投日报")
+    rows = []
+    cards = []
+    for item in items:
+        fund = item["fund"]
+        summary = item["summary"]
+        estimate = item["estimate"] or {}
+        name = fund.get("label") or estimate.get("name") or fund["code"]
+        signal, advice = summary["signal"]
+        one_month = fmt_pct(summary["return_30d"])
+        three_year = fmt_pct(summary["return_3y"])
+        drawdown = fmt_pct(summary["drawdown_3y"], signed=False)
+        vol = fmt_pct(summary["vol_3y"], signed=False)
+        daily = fmt_pct(summary.get("estimate_growth", summary.get("latest_growth")))
+        holding_lines = ""
+        if summary.get("invested_amount") is not None:
+            holding_lines += f"<p>累计投入：<b>{fmt_money(summary['invested_amount'])}</b></p>"
+        if summary.get("dca_status"):
+            holding_lines += f"<p>定投状态：<b>{html.escape(summary['dca_status'])}</b></p>"
+        if summary.get("current_position_value") is not None:
+            holding_lines += f"<p>当前持仓：<b>{fmt_money(summary['current_position_value'])}</b></p>"
+        if summary.get("holding_profit") is not None:
+            holding_lines += (
+                f"<p>持有收益：<b>{fmt_signed_money(summary['holding_profit'])}</b> "
+                f"({fmt_pct(summary['holding_profit_rate'])})</p>"
+            )
+
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(name)}</td>"
+            f"<td>{summary['latest_date']}</td>"
+            f"<td>{fmt_num(summary['latest_nav'])}</td>"
+            f"<td>{daily}</td>"
+            f"<td>{one_month}</td>"
+            f"<td>{three_year}</td>"
+            f"<td>{drawdown}</td>"
+            "</tr>"
+        )
+        cards.append(
+            f"""
+<section>
+  <h2>{html.escape(name)}</h2>
+  <p>最新净值：<b>{fmt_num(summary['latest_nav'])}</b>，净值日：{summary['latest_date']}，当日估算/涨跌：<b>{daily}</b></p>
+  <p>近1月：<b>{one_month}</b>，近3年：<b>{three_year}</b>，最大回撤：<b>{drawdown}</b>，年化波动率：<b>{vol}</b></p>
+  {holding_lines}
+  <p>操作提示：<b>{html.escape(signal)}</b></p>
+  <p>{html.escape(advice)}</p>
+</section>"""
+        )
+
+    return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; color: #101828; }}
+  h1 {{ font-size: 20px; margin: 0 0 8px; }}
+  h2 {{ font-size: 17px; margin: 18px 0 8px; }}
+  p {{ margin: 6px 0; line-height: 1.65; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 12px; }}
+  th, td {{ border: 1px solid #eaecf0; padding: 7px 6px; font-size: 12px; text-align: left; }}
+  th {{ background: #f2f4f7; }}
+  .note {{ color: #667085; font-size: 12px; }}
+</style>
+</head>
+<body>
+  <h1>{html.escape(title)}</h1>
+  <p class="note">生成时间：{now}。微信版为精简摘要；完整图表 HTML 已在 GitHub Actions 的 report artifact 中生成。</p>
+  {''.join(cards)}
+  <table>
+    <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近1月</th><th>近3年</th><th>最大回撤</th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+  <p class="note">本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
+</body>
+</html>"""
+
+
 def collect_items(config, days):
     items = []
     for fund in config.get("funds", []):
@@ -999,7 +1079,9 @@ def main():
     title = f"{config.get('title', '美股指数基金定投日报')} {today}"
     print(f"report={out_path}")
     if args.send and not args.dry_run:
-        result = send_pushplus(config, title, report)
+        push_content = build_pushplus_report(items, config)
+        print(f"pushplus_content_chars={len(push_content)}")
+        result = send_pushplus(config, title, push_content)
         print(result)
 
 
