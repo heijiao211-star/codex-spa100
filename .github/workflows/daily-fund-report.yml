@@ -1,0 +1,26 @@
+name: Daily fund report
+
+on:
+  schedule:
+    # 08:30 Asia/Shanghai. GitHub Actions cron uses UTC.
+    - cron: "30 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  pushplus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TZ: Asia/Shanghai
+      PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Send report
+        run: python daily_fund_report.py --send

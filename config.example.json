@@ -1,0 +1,17 @@
+{
+  "title": "美股指数基金定投日报",
+  "history_days": 420,
+  "pushplus_token": "把你的 PushPlus token 放到 config.local.json，或设置环境变量 PUSHPLUS_TOKEN",
+  "funds": [
+    {
+      "code": "270042",
+      "label": "纳斯达克100 · 广发纳指ETF联接A",
+      "color": "#2563eb"
+    },
+    {
+      "code": "050025",
+      "label": "标普500 · 博时标普500ETF联接A",
+      "color": "#0f766e"
+    }
+  ]
+}
