@@ -58,7 +58,6 @@ The workflow reads fund definitions from `config.json`.
 If you want to change the tracked funds, edit `config.json` before pushing:
 
 - Nasdaq 100 QDII fund code
-- S&P 500 QDII fund code
 - labels and colors
 
 Do not store the PushPlus token in `config.json`; GitHub Actions provides it through the `PUSHPLUS_TOKEN` secret.

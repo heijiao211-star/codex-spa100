@@ -23,9 +23,7 @@ PUSHPLUS_URL = "https://www.pushplus.plus/send"
 QUICKCHART_CREATE_URL = "https://quickchart.io/chart/create"
 DEFAULT_HISTORY_DAYS = 1200
 DEFAULT_BENCHMARKS = [
-    {"type": "fund", "code": "510300", "label": "沪深300ETF", "color": "#f59e0b"},
     {"type": "fund", "code": "513300", "label": "纳斯达克100ETF", "color": "#7c3aed"},
-    {"type": "fund", "code": "513500", "label": "标普500ETF", "color": "#dc2626"},
 ]
 
 
@@ -65,19 +63,24 @@ def http_get(url, timeout=20, encoding="utf-8", retries=3, referer="https://fund
     raise last_error
 
 
-def http_post_json(url, payload, timeout=20):
+def http_post_json(url, payload, timeout=20, retries=3):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Content-Type": "application/json;charset=utf-8",
-            "User-Agent": "CodexFundReport/2.0",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="ignore")
+    headers = {
+        "Content-Type": "application/json;charset=utf-8",
+        "User-Agent": "CodexFundReport/2.0",
+    }
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8", errors="ignore")
+        except Exception as exc:
+            last_error = exc
+            if attempt == retries:
+                break
+            time.sleep(0.8 * attempt)
+    raise last_error
 
 
 def quickchart_url(chart_config, width=760, height=360):
@@ -286,46 +289,6 @@ def required_history_days(config):
     return max(int(config.get("history_days", DEFAULT_HISTORY_DAYS)), DEFAULT_HISTORY_DAYS)
 
 
-def holding_snapshot(rows, holding):
-    if not holding:
-        return {}
-    units = to_float(holding.get("units"))
-    invested_amount = (
-        to_float(holding.get("invested_amount"))
-        or to_float(holding.get("total_invested"))
-        or to_float(holding.get("total_cost"))
-    )
-    holding_cost = to_float(holding.get("holding_cost")) or invested_amount
-    total_cost = to_float(holding.get("total_cost")) or invested_amount or holding_cost
-    current_value = (
-        to_float(holding.get("current_value"))
-        or to_float(holding.get("current_position_value"))
-        or to_float(holding.get("market_value"))
-    )
-    latest_nav = rows[-1]["nav"]
-
-    if current_value is None and units is not None:
-        current_value = latest_nav * units
-
-    snapshot = {
-        "units": units,
-        "invested_amount": invested_amount,
-        "holding_cost": holding_cost,
-        "total_cost": total_cost,
-        "dca_status": holding.get("status") or holding.get("dca_status"),
-    }
-
-    if current_value is not None:
-        snapshot["current_position_value"] = current_value
-        if holding_cost is not None:
-            snapshot["holding_profit"] = current_value - holding_cost
-            snapshot["holding_profit_rate"] = pct_change(holding_cost, current_value)
-        if total_cost is not None:
-            snapshot["cumulative_profit"] = current_value - total_cost
-
-    return {key: value for key, value in snapshot.items() if value not in (None, "")}
-
-
 def build_drawdown_points(rows, use_trend_value=True):
     points = []
     peak = None
@@ -336,12 +299,6 @@ def build_drawdown_points(rows, use_trend_value=True):
         drawdown = (value / peak - 1) * 100 if peak else 0
         points.append({"date": row["date"], "value": drawdown})
     return points
-
-
-def build_profit_points(rows, units, cost_amount):
-    if units is None or cost_amount is None:
-        return []
-    return [{"date": row["date"], "value": row["nav"] * units - cost_amount} for row in rows]
 
 
 def fmt_pct(value, signed=True):
@@ -355,19 +312,6 @@ def fmt_num(value, digits=4):
     if value is None:
         return "--"
     return f"{value:.{digits}f}"
-
-
-def fmt_money(value):
-    if value is None:
-        return "--"
-    return f"{value:,.2f}"
-
-
-def fmt_signed_money(value):
-    if value is None:
-        return "--"
-    prefix = "+" if value > 0 else ""
-    return f"{prefix}{value:,.2f}"
 
 
 def color_for(value):
@@ -592,6 +536,17 @@ def sample_chart_points(points, max_points):
     return [point for point in sampled if point.get("value") is not None]
 
 
+def quickchart_tick_options(y_suffix=""):
+    ticks = {
+        "fontColor": "#667085",
+        "fontSize": 11,
+        "padding": 6,
+    }
+    if y_suffix == "%":
+        ticks["suggestedMax"] = 100
+    return ticks
+
+
 def chart_line_config(title, series_list, y_suffix="", max_points=80):
     labels = []
     datasets = []
@@ -612,17 +567,42 @@ def chart_line_config(title, series_list, y_suffix="", max_points=80):
                 "pointRadius": 0,
                 "fill": False,
                 "tension": 0.15,
+                "lineTension": 0.15,
             }
         )
     return {
         "type": "line",
         "data": {"labels": labels, "datasets": datasets},
         "options": {
-            "title": {"display": True, "text": title, "fontSize": 18},
-            "legend": {"display": len(datasets) > 1, "position": "bottom"},
+            "responsive": True,
+            "maintainAspectRatio": False,
+            "layout": {"padding": {"left": 10, "right": 14, "top": 12, "bottom": 8}},
+            "title": {
+                "display": True,
+                "text": title,
+                "fontSize": 18,
+                "fontColor": "#111827",
+                "fontStyle": "600",
+                "padding": 16,
+            },
+            "legend": {
+                "display": len(datasets) > 1,
+                "position": "bottom",
+                "labels": {"boxWidth": 10, "fontColor": "#475467", "padding": 14},
+            },
             "scales": {
-                "xAxes": [{"ticks": {"maxTicksLimit": 6}}],
-                "yAxes": [{"ticks": {"callback": f"function(value){{return value + '{y_suffix}';}}"}}],
+                "xAxes": [
+                    {
+                        "gridLines": {"display": False, "drawBorder": False},
+                        "ticks": {"maxTicksLimit": 6, "fontColor": "#667085", "fontSize": 10},
+                    }
+                ],
+                "yAxes": [
+                    {
+                        "gridLines": {"color": "#eef2f6", "drawBorder": False},
+                        "ticks": quickchart_tick_options(y_suffix),
+                    }
+                ],
             },
         },
     }
@@ -646,9 +626,32 @@ def chart_bar_config(title, rows, color="#2563eb"):
             ],
         },
         "options": {
-            "title": {"display": True, "text": title, "fontSize": 18},
+            "responsive": True,
+            "maintainAspectRatio": False,
+            "layout": {"padding": {"left": 10, "right": 14, "top": 12, "bottom": 8}},
+            "title": {
+                "display": True,
+                "text": title,
+                "fontSize": 18,
+                "fontColor": "#111827",
+                "fontStyle": "600",
+                "padding": 16,
+            },
             "legend": {"display": False},
-            "scales": {"yAxes": [{"ticks": {"callback": "function(value){return value + '%';}"}}]},
+            "scales": {
+                "xAxes": [
+                    {
+                        "gridLines": {"display": False, "drawBorder": False},
+                        "ticks": {"fontColor": "#667085", "fontSize": 10},
+                    }
+                ],
+                "yAxes": [
+                    {
+                        "gridLines": {"color": "#eef2f6", "drawBorder": False},
+                        "ticks": quickchart_tick_options("%"),
+                    }
+                ],
+            },
         },
     }
 
@@ -673,8 +676,8 @@ def align_series_to_labels(points, labels):
 
 def image_html(url, alt):
     return (
-        f"<p><img src='{html.escape(url)}' alt='{html.escape(alt)}' "
-        "style='width:100%;max-width:760px;border:1px solid #eaecf0;border-radius:6px;'/></p>"
+        f"<div class='chart-card'><img src='{html.escape(url)}' alt='{html.escape(alt)}' "
+        "style='width:100%;max-width:760px;display:block;border:0;border-radius:8px;'/></div>"
     )
 
 
@@ -737,7 +740,7 @@ def pushplus_chart_images(item, benchmarks):
     chart_specs.append(
         (
             f"{name} vs 基准",
-            chart_line_config(f"{name} vs 沪深300 / 纳斯达克100 / 标普500", compare_series, y_suffix="%", max_points=90),
+            chart_line_config(f"{name} vs 纳斯达克100ETF", compare_series, y_suffix="%", max_points=90),
         )
     )
 
@@ -748,7 +751,7 @@ def pushplus_chart_images(item, benchmarks):
     return "".join(images)
 
 
-def summarize(rows, estimate, holding=None):
+def summarize(rows, estimate):
     latest = rows[-1]
     trend_values = [trend_value(x) for x in rows]
     latest_growth = latest.get("growth")
@@ -776,7 +779,6 @@ def summarize(rows, estimate, holding=None):
         "ma20": ma20,
         "ma60": ma60,
     }
-    summary.update(holding_snapshot(rows, holding))
     summary["signal"] = make_signal(summary, latest["nav"])
     return summary
 
@@ -797,7 +799,7 @@ def make_signal(summary, latest_nav):
     if r30 is not None and r30 >= 8.0 and growth is not None and growth > 0:
         return ("控制追高", "短期涨幅偏快，新增资金宜按原定投节奏，不建议情绪化加码。")
     if ma20 and ma60 and latest_nav > ma20 > ma60:
-        return ("趋势偏强", "中短期均线向上，持仓可继续跟随，新增资金保持纪律。")
+        return ("趋势偏强", "中短期均线向上，新增资金保持纪律。")
     if ma20 and latest_nav < ma20:
         return ("等待确认", "净值低于 20 日均线，短线偏弱，适合分批而不是单笔重仓。")
     return ("保持定投", "没有出现极端涨跌，按计划投入比择时更重要。")
@@ -830,47 +832,10 @@ def build_card(item, benchmarks, index):
         metric_cell("最大回撤", fmt_pct(summary["drawdown_3y"], signed=False)),
         metric_cell("年化波动率", fmt_pct(summary["vol_3y"], signed=False)),
     ]
-    if summary.get("invested_amount") is not None:
-        metrics.append(metric_cell("累计投入金额", fmt_money(summary["invested_amount"])))
-    if summary.get("dca_status"):
-        metrics.append(metric_cell("定投状态", html.escape(summary["dca_status"])))
-    if summary.get("current_position_value") is not None:
-        metrics.extend(
-            [
-                metric_cell("当前持仓金额", fmt_money(summary["current_position_value"])),
-            ]
-        )
-    if summary.get("holding_profit") is not None:
-        metrics.append(
-            metric_cell(
-                "持有收益 / 持有收益率",
-                f"{fmt_signed_money(summary['holding_profit'])} / {fmt_pct(summary['holding_profit_rate'])}",
-                color_for(summary["holding_profit"]),
-            )
-        )
-    if summary.get("cumulative_profit") is not None:
-        metrics.append(
-            metric_cell(
-                "累计收益",
-                fmt_signed_money(summary["cumulative_profit"]),
-                color_for(summary["cumulative_profit"]),
-            )
-        )
     metrics.append(metric_cell("操作提示", html.escape(signal)))
 
     one_month_rows = rows_since_calendar_days(rows, 30)
     three_year_rows = rows_since_calendar_days(rows, 365 * 3)
-
-    holding_sections = ""
-    if summary.get("units") is not None:
-        holding_points = build_profit_points(three_year_rows, summary["units"], summary["holding_cost"])
-        total_points = build_profit_points(three_year_rows, summary["units"], summary["total_cost"])
-        holding_sections = f"""
-  <h3>持仓收益趋势图</h3>
-  {svg_multi_line([points_to_series(holding_points, "持有收益", fund.get("color", "#2563eb"))], value_kind="money")}
-  <h3>累计收益曲线</h3>
-  {svg_multi_line([points_to_series(total_points, "累计收益", "#0f766e")], value_kind="money")}
-"""
 
     compare_series = [
         rows_to_series(
@@ -917,8 +882,7 @@ def build_card(item, benchmarks, index):
   {svg_line(three_year_rows, color=fund.get("color", "#2563eb"), fill_id=f"fill3y{index}", full_dates=True, max_points=96)}
   <h3>回撤曲线</h3>
   {svg_multi_line([points_to_series(build_drawdown_points(three_year_rows), "回撤", "#ef4444")], value_kind="pct")}
-  {holding_sections}
-  <h3>基金 vs 沪深300 / 纳斯达克100 / 标普500 对比图</h3>
+  <h3>基金 vs 纳斯达克100ETF 对比图</h3>
   {svg_multi_line(compare_series, value_kind="pct")}
 </section>"""
 
@@ -947,7 +911,7 @@ def build_report(items, benchmarks, config):
     else:
         temp_text = "中性，按计划执行更优"
 
-    title = config.get("title", "美股指数基金定投日报")
+    title = config.get("title", "纳斯达克100基金定投日报")
     cards = "\n".join(build_card(item, benchmarks, idx) for idx, item in enumerate(items))
     data_rows = []
     for item in items:
@@ -1078,7 +1042,7 @@ def build_report(items, benchmarks, config):
     <thead><tr><th>基金</th><th>净值日</th><th>最新净值</th><th>当日估算/涨跌</th><th>近1月</th><th>近3年</th><th>最大回撤</th><th>年化波动率</th><th>提示</th></tr></thead>
     <tbody>{''.join(data_rows)}</tbody>
   </table>
-  <p class="note">说明：红色代表上涨，绿色代表下跌。持仓金额、持仓成本、持有收益、累计收益等指标依赖基金配置中的持仓信息；如未配置则自动忽略。基准对比图使用归一化收益率展示趋势差异，仅作定投节奏参考，不构成个性化投资建议。</p>
+  <p class="note">说明：红色代表上涨，绿色代表下跌。基准对比图使用归一化收益率展示趋势差异，仅作定投节奏参考，不构成个性化投资建议。</p>
 </main>
 </body>
 </html>"""
@@ -1086,7 +1050,15 @@ def build_report(items, benchmarks, config):
 
 def build_pushplus_report(items, benchmarks, config):
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    title = config.get("title", "美股指数基金定投日报")
+    title = config.get("title", "纳斯达克100基金定投日报")
+    temp = market_temperature(items)
+    if temp >= 68:
+        temp_text = "偏热，控制追涨"
+    elif temp <= 38:
+        temp_text = "偏冷，分批承接"
+    else:
+        temp_text = "中性，按计划执行"
+
     rows = []
     cards = []
     for item in items:
@@ -1100,18 +1072,9 @@ def build_pushplus_report(items, benchmarks, config):
         drawdown = fmt_pct(summary["drawdown_3y"], signed=False)
         vol = fmt_pct(summary["vol_3y"], signed=False)
         daily = fmt_pct(summary.get("estimate_growth", summary.get("latest_growth")))
-        holding_lines = ""
-        if summary.get("invested_amount") is not None:
-            holding_lines += f"<p>累计投入：<b>{fmt_money(summary['invested_amount'])}</b></p>"
-        if summary.get("dca_status"):
-            holding_lines += f"<p>定投状态：<b>{html.escape(summary['dca_status'])}</b></p>"
-        if summary.get("current_position_value") is not None:
-            holding_lines += f"<p>当前持仓：<b>{fmt_money(summary['current_position_value'])}</b></p>"
-        if summary.get("holding_profit") is not None:
-            holding_lines += (
-                f"<p>持有收益：<b>{fmt_signed_money(summary['holding_profit'])}</b> "
-                f"({fmt_pct(summary['holding_profit_rate'])})</p>"
-            )
+        daily_color = color_for(summary.get("estimate_growth", summary.get("latest_growth")))
+        month_color = color_for(summary["return_30d"])
+        year_color = color_for(summary["return_3y"])
 
         rows.append(
             "<tr>"
@@ -1126,13 +1089,24 @@ def build_pushplus_report(items, benchmarks, config):
         )
         cards.append(
             f"""
-<section>
-  <h2>{html.escape(name)}</h2>
-  <p>最新净值：<b>{fmt_num(summary['latest_nav'])}</b>，净值日：{summary['latest_date']}，当日估算/涨跌：<b>{daily}</b></p>
-  <p>近1月：<b>{one_month}</b>，近3年：<b>{three_year}</b>，最大回撤：<b>{drawdown}</b>，年化波动率：<b>{vol}</b></p>
-  {holding_lines}
-  <p>操作提示：<b>{html.escape(signal)}</b></p>
-  <p>{html.escape(advice)}</p>
+<section class="fund-card">
+  <div class="fund-top">
+    <div>
+      <div class="code">{html.escape(fund['code'])}</div>
+      <h2>{html.escape(name)}</h2>
+      <p class="sub">净值日 {summary['latest_date']}</p>
+    </div>
+    <div class="daily" style="color:{daily_color};background:{daily_color}12;border-color:{daily_color}33;">{daily}</div>
+  </div>
+  <div class="metric-grid">
+    <div><span>最新净值</span><b>{fmt_num(summary['latest_nav'])}</b></div>
+    <div><span>近1月</span><b style="color:{month_color};">{one_month}</b></div>
+    <div><span>近3年</span><b style="color:{year_color};">{three_year}</b></div>
+    <div><span>最大回撤</span><b>{drawdown}</b></div>
+    <div><span>年化波动率</span><b>{vol}</b></div>
+    <div><span>操作提示</span><b>{html.escape(signal)}</b></div>
+  </div>
+  <div class="advice"><b>{html.escape(signal)}</b><p>{html.escape(advice)}</p></div>
   {pushplus_chart_images(item, benchmarks)}
 </section>"""
         )
@@ -1142,25 +1116,104 @@ def build_pushplus_report(items, benchmarks, config):
 <head>
 <meta charset="utf-8">
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; color: #101828; }}
-  h1 {{ font-size: 20px; margin: 0 0 8px; }}
-  h2 {{ font-size: 17px; margin: 18px 0 8px; }}
-  p {{ margin: 6px 0; line-height: 1.65; }}
-  table {{ width: 100%; border-collapse: collapse; margin-top: 12px; }}
-  th, td {{ border: 1px solid #eaecf0; padding: 7px 6px; font-size: 12px; text-align: left; }}
-  th {{ background: #f2f4f7; }}
-  .note {{ color: #667085; font-size: 12px; }}
+  body {{
+    margin: 0;
+    background: #f5f7fb;
+    color: #101828;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", Arial, sans-serif;
+  }}
+  .wrap {{ max-width: 760px; margin: 0 auto; padding: 14px 12px 22px; }}
+  .hero {{
+    padding: 20px 18px;
+    border-radius: 8px;
+    background: #111827;
+    color: #fff;
+  }}
+  h1 {{ font-size: 22px; line-height: 1.25; margin: 0 0 8px; }}
+  .hero p {{ margin: 0; color: #d0d5dd; font-size: 13px; line-height: 1.7; }}
+  .temperature {{
+    display: inline-block;
+    margin-top: 12px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    background: rgba(255,255,255,.12);
+    border: 1px solid rgba(255,255,255,.18);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+  }}
+  .fund-card {{
+    margin-top: 14px;
+    padding: 16px 14px;
+    border: 1px solid #e4e7ec;
+    border-radius: 8px;
+    background: #fff;
+  }}
+  .fund-top {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }}
+  .code {{ color: #667085; font-size: 12px; font-weight: 700; }}
+  h2 {{ font-size: 19px; line-height: 1.3; margin: 4px 0 4px; }}
+  .sub {{ margin: 0; color: #667085; font-size: 12px; }}
+  .daily {{
+    min-width: 72px;
+    padding: 7px 8px;
+    border: 1px solid;
+    border-radius: 8px;
+    text-align: center;
+    font-size: 20px;
+    font-weight: 800;
+  }}
+  .metric-grid {{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 14px;
+  }}
+  .metric-grid div {{
+    padding: 10px;
+    border-radius: 8px;
+    background: #f8fafc;
+    border: 1px solid #edf2f7;
+  }}
+  .metric-grid span {{ display: block; color: #667085; font-size: 12px; margin-bottom: 4px; }}
+  .metric-grid b {{ font-size: 16px; }}
+  .advice {{
+    margin-top: 12px;
+    padding: 11px 12px;
+    border-left: 4px solid #2563eb;
+    background: #eff6ff;
+    border-radius: 7px;
+    color: #1d2939;
+    line-height: 1.65;
+  }}
+  .advice p {{ margin: 4px 0 0; }}
+  .chart-card {{
+    margin-top: 12px;
+    padding: 8px;
+    border-radius: 8px;
+    border: 1px solid #e4e7ec;
+    background: #fff;
+  }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 14px; background: #fff; }}
+  th, td {{ border-bottom: 1px solid #eaecf0; padding: 8px 6px; font-size: 12px; text-align: left; }}
+  th {{ background: #111827; color: #fff; }}
+  .note {{ color: #667085; font-size: 12px; line-height: 1.7; }}
 </style>
 </head>
 <body>
-  <h1>{html.escape(title)}</h1>
-  <p class="note">生成时间：{now}。图表为微信友好图片版；完整 HTML 同步生成在 GitHub Actions 的 report artifact 中。</p>
-  {''.join(cards)}
-  <table>
-    <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近1月</th><th>近3年</th><th>最大回撤</th></tr></thead>
-    <tbody>{''.join(rows)}</tbody>
-  </table>
-  <p class="note">本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
+  <main class="wrap">
+    <section class="hero">
+      <h1>{html.escape(title)}</h1>
+      <p>生成时间：{now}。图表为微信友好图片版，完整 HTML 同步生成在 GitHub Actions 的 report artifact 中。</p>
+      <div class="temperature">市场温度 {temp}/100 · {temp_text}</div>
+    </section>
+    {''.join(cards)}
+    <table>
+      <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近1月</th><th>近3年</th><th>最大回撤</th></tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+    </table>
+    <p class="note">本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
+  </main>
 </body>
 </html>"""
 
@@ -1171,7 +1224,7 @@ def collect_items(config, days):
         code = str(fund["code"]).strip()
         rows = fetch_history(code, days=days)
         estimate = fetch_estimate(code)
-        summary = summarize(rows, estimate, fund.get("holding"))
+        summary = summarize(rows, estimate)
         items.append({"fund": fund, "rows": rows, "estimate": estimate, "summary": summary})
         time.sleep(0.2)
     return items
