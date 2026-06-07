@@ -51,7 +51,7 @@
 
 ## 持仓信息配置
 
-在某只基金下增加可选的 `holding`：
+在某只基金下增加可选的 `holding`。如果你在支付宝里只看到投入金额，就填 `invested_amount`：
 
 ```json
 {
@@ -59,18 +59,18 @@
   "label": "纳斯达克100 · 广发纳指ETF联接A",
   "color": "#2563eb",
   "holding": {
-    "units": 10000,
-    "holding_cost": 12000,
-    "total_cost": 15000
+    "invested_amount": 300000,
+    "status": "持续定投"
   }
 }
 ```
 
 说明：
 
-- `units`：当前持有份额
-- `holding_cost`：当前持仓对应成本
-- `total_cost`：累计投入成本，不填时默认等于 `holding_cost`
+- `invested_amount`：累计投入金额，适合支付宝页面只显示投入金额的情况
+- `status`：定投状态，例如 `持续定投`
+- `current_value`：当前持有金额，可选；填了以后才会计算持有收益 / 收益率
+- `units`：当前持有份额，可选；如果你能看到份额，也可以用它自动估算当前持有金额
 
 ## 基准配置
 

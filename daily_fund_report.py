@@ -274,23 +274,40 @@ def holding_snapshot(rows, holding):
     if not holding:
         return {}
     units = to_float(holding.get("units"))
-    holding_cost = to_float(holding.get("holding_cost"))
-    total_cost = to_float(holding.get("total_cost"))
-    if units is None or holding_cost is None:
-        return {}
+    invested_amount = (
+        to_float(holding.get("invested_amount"))
+        or to_float(holding.get("total_invested"))
+        or to_float(holding.get("total_cost"))
+    )
+    holding_cost = to_float(holding.get("holding_cost")) or invested_amount
+    total_cost = to_float(holding.get("total_cost")) or invested_amount or holding_cost
+    current_value = (
+        to_float(holding.get("current_value"))
+        or to_float(holding.get("current_position_value"))
+        or to_float(holding.get("market_value"))
+    )
     latest_nav = rows[-1]["nav"]
-    current_value = latest_nav * units
-    holding_profit = current_value - holding_cost
-    total_cost = total_cost if total_cost is not None else holding_cost
-    return {
+
+    if current_value is None and units is not None:
+        current_value = latest_nav * units
+
+    snapshot = {
         "units": units,
+        "invested_amount": invested_amount,
         "holding_cost": holding_cost,
         "total_cost": total_cost,
-        "current_position_value": current_value,
-        "holding_profit": holding_profit,
-        "holding_profit_rate": pct_change(holding_cost, current_value),
-        "cumulative_profit": current_value - total_cost,
+        "dca_status": holding.get("status") or holding.get("dca_status"),
     }
+
+    if current_value is not None:
+        snapshot["current_position_value"] = current_value
+        if holding_cost is not None:
+            snapshot["holding_profit"] = current_value - holding_cost
+            snapshot["holding_profit_rate"] = pct_change(holding_cost, current_value)
+        if total_cost is not None:
+            snapshot["cumulative_profit"] = current_value - total_cost
+
+    return {key: value for key, value in snapshot.items() if value not in (None, "")}
 
 
 def build_drawdown_points(rows, use_trend_value=True):
@@ -636,22 +653,31 @@ def build_card(item, benchmarks, index):
         metric_cell("最大回撤", fmt_pct(summary["drawdown_3y"], signed=False)),
         metric_cell("年化波动率", fmt_pct(summary["vol_3y"], signed=False)),
     ]
+    if summary.get("invested_amount") is not None:
+        metrics.append(metric_cell("累计投入金额", fmt_money(summary["invested_amount"])))
+    if summary.get("dca_status"):
+        metrics.append(metric_cell("定投状态", html.escape(summary["dca_status"])))
     if summary.get("current_position_value") is not None:
         metrics.extend(
             [
                 metric_cell("当前持仓金额", fmt_money(summary["current_position_value"])),
-                metric_cell("持仓成本", fmt_money(summary["holding_cost"])),
-                metric_cell(
-                    "持有收益 / 持有收益率",
-                    f"{fmt_signed_money(summary['holding_profit'])} / {fmt_pct(summary['holding_profit_rate'])}",
-                    color_for(summary["holding_profit"]),
-                ),
-                metric_cell(
-                    "累计收益",
-                    fmt_signed_money(summary["cumulative_profit"]),
-                    color_for(summary["cumulative_profit"]),
-                ),
             ]
+        )
+    if summary.get("holding_profit") is not None:
+        metrics.append(
+            metric_cell(
+                "持有收益 / 持有收益率",
+                f"{fmt_signed_money(summary['holding_profit'])} / {fmt_pct(summary['holding_profit_rate'])}",
+                color_for(summary["holding_profit"]),
+            )
+        )
+    if summary.get("cumulative_profit") is not None:
+        metrics.append(
+            metric_cell(
+                "累计收益",
+                fmt_signed_money(summary["cumulative_profit"]),
+                color_for(summary["cumulative_profit"]),
+            )
         )
     metrics.append(metric_cell("操作提示", html.escape(signal)))
 

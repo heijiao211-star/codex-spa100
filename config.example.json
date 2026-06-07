@@ -8,9 +8,9 @@
       "label": "纳斯达克100 · 广发纳指ETF联接A",
       "color": "#2563eb",
       "holding": {
-        "units": 10000,
-        "holding_cost": 12000,
-        "total_cost": 15000
+        "invested_amount": 300000,
+        "status": "持续定投",
+        "current_value": 330000
       }
     },
     {
