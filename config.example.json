@@ -1,17 +1,42 @@
 {
   "title": "美股指数基金定投日报",
-  "history_days": 420,
+  "history_days": 1200,
   "pushplus_token": "把你的 PushPlus token 放到 config.local.json，或设置环境变量 PUSHPLUS_TOKEN",
   "funds": [
     {
       "code": "270042",
       "label": "纳斯达克100 · 广发纳指ETF联接A",
-      "color": "#2563eb"
+      "color": "#2563eb",
+      "holding": {
+        "units": 10000,
+        "holding_cost": 12000,
+        "total_cost": 15000
+      }
     },
     {
       "code": "050025",
       "label": "标普500 · 博时标普500ETF联接A",
       "color": "#0f766e"
+    }
+  ],
+  "benchmarks": [
+    {
+      "type": "fund",
+      "code": "510300",
+      "label": "沪深300ETF",
+      "color": "#f59e0b"
+    },
+    {
+      "type": "fund",
+      "code": "513300",
+      "label": "纳斯达克100ETF",
+      "color": "#7c3aed"
+    },
+    {
+      "type": "fund",
+      "code": "513500",
+      "label": "标普500ETF",
+      "color": "#dc2626"
     }
   ]
 }
