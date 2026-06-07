@@ -96,4 +96,6 @@ QDII 基金通常存在净值披露延迟，简报中的“当日”更准确地
 
 - `PUSHPLUS_TOKEN`：你的 PushPlus token
 
+注意这里需要填 PushPlus 官网“发送消息”页面里的用户 token，不是 SecretKey。填错时脚本会明确报 `PushPlus 发送失败`，避免误以为发送成功。
+
 `.github/workflows/daily-fund-report.yml` 已配置为每天北京时间 08:30 推送，也支持在 Actions 页面手动点击 `Run workflow` 测试。

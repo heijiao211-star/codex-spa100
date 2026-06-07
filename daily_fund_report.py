@@ -966,7 +966,15 @@ def send_pushplus(config, title, content):
     topic = config.get("pushplus_topic")
     if topic:
         payload["topic"] = topic
-    return http_post_json(PUSHPLUS_URL, payload)
+    result = http_post_json(PUSHPLUS_URL, payload)
+    try:
+        result_data = json.loads(result)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"PushPlus 返回了无法解析的响应: {result}") from None
+    if result_data.get("code") != 200:
+        msg = result_data.get("msg") or result_data.get("data") or result
+        raise RuntimeError(f"PushPlus 发送失败: code={result_data.get('code')} msg={msg}")
+    return result
 
 
 def main():
