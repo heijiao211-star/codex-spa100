@@ -20,6 +20,7 @@ FUND_HISTORY_URL = "https://fundf10.eastmoney.com/F10DataApi.aspx"
 ESTIMATE_URL = "https://fundgz.1234567.com.cn/js/{code}.js"
 INDEX_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
+QUICKCHART_CREATE_URL = "https://quickchart.io/chart/create"
 DEFAULT_HISTORY_DAYS = 1200
 DEFAULT_BENCHMARKS = [
     {"type": "fund", "code": "510300", "label": "沪深300ETF", "color": "#f59e0b"},
@@ -77,6 +78,21 @@ def http_post_json(url, payload, timeout=20):
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8", errors="ignore")
+
+
+def quickchart_url(chart_config, width=760, height=360):
+    payload = {
+        "chart": chart_config,
+        "width": width,
+        "height": height,
+        "format": "png",
+        "backgroundColor": "white",
+    }
+    result = http_post_json(QUICKCHART_CREATE_URL, payload, timeout=30)
+    data = json.loads(result)
+    if not data.get("success") or not data.get("url"):
+        raise RuntimeError(f"QuickChart 生成失败: {result}")
+    return data["url"]
 
 
 def clean_cell(value):
@@ -571,6 +587,167 @@ def points_to_series(points, label, color):
     return {"label": label, "color": color, "points": points}
 
 
+def sample_chart_points(points, max_points):
+    sampled = sample_points(points, max_points)
+    return [point for point in sampled if point.get("value") is not None]
+
+
+def chart_line_config(title, series_list, y_suffix="", max_points=80):
+    labels = []
+    datasets = []
+    for series in series_list:
+        points = sample_chart_points(series.get("points", []), max_points)
+        if not points:
+            continue
+        if not labels:
+            labels = [point["date"] for point in points]
+        values = align_series_to_labels(points, labels)
+        datasets.append(
+            {
+                "label": series["label"],
+                "data": values,
+                "borderColor": series["color"],
+                "backgroundColor": series["color"],
+                "borderWidth": 2.2,
+                "pointRadius": 0,
+                "fill": False,
+                "tension": 0.15,
+            }
+        )
+    return {
+        "type": "line",
+        "data": {"labels": labels, "datasets": datasets},
+        "options": {
+            "title": {"display": True, "text": title, "fontSize": 18},
+            "legend": {"display": len(datasets) > 1, "position": "bottom"},
+            "scales": {
+                "xAxes": [{"ticks": {"maxTicksLimit": 6}}],
+                "yAxes": [{"ticks": {"callback": f"function(value){{return value + '{y_suffix}';}}"}}],
+            },
+        },
+    }
+
+
+def chart_bar_config(title, rows, color="#2563eb"):
+    rows = rows[-7:]
+    return {
+        "type": "bar",
+        "data": {
+            "labels": [row["date"][5:] for row in rows],
+            "datasets": [
+                {
+                    "label": "日涨跌",
+                    "data": [row["growth"] if row.get("growth") is not None else 0 for row in rows],
+                    "backgroundColor": [
+                        "#d92d20" if (row.get("growth") or 0) >= 0 else "#039855"
+                        for row in rows
+                    ],
+                }
+            ],
+        },
+        "options": {
+            "title": {"display": True, "text": title, "fontSize": 18},
+            "legend": {"display": False},
+            "scales": {"yAxes": [{"ticks": {"callback": "function(value){return value + '%';}"}}]},
+        },
+    }
+
+
+def align_series_to_labels(points, labels):
+    by_date = {point["date"]: point["value"] for point in points}
+    ordered = sorted(points, key=lambda point: point["date"])
+    values = []
+    cursor = 0
+    last_value = None
+    for label in labels:
+        if label in by_date:
+            last_value = by_date[label]
+            values.append(last_value)
+            continue
+        while cursor < len(ordered) and ordered[cursor]["date"] <= label:
+            last_value = ordered[cursor]["value"]
+            cursor += 1
+        values.append(last_value)
+    return values
+
+
+def image_html(url, alt):
+    return (
+        f"<p><img src='{html.escape(url)}' alt='{html.escape(alt)}' "
+        "style='width:100%;max-width:760px;border:1px solid #eaecf0;border-radius:6px;'/></p>"
+    )
+
+
+def pushplus_chart_images(item, benchmarks):
+    fund = item["fund"]
+    rows = item["rows"]
+    summary = item["summary"]
+    estimate = item["estimate"] or {}
+    name = fund.get("label") or estimate.get("name") or fund["code"]
+    color = fund.get("color", "#2563eb")
+    one_month_rows = rows_since_calendar_days(rows, 30)
+    three_year_rows = rows_since_calendar_days(rows, 365 * 3)
+
+    chart_specs = [
+        (
+            f"{name} 近1个月净值趋势",
+            chart_line_config(
+                f"{name} 近1个月净值趋势",
+                [rows_to_series(one_month_rows, "净值", color, use_trend=True)],
+                max_points=40,
+            ),
+        ),
+        (
+            f"{name} 近3年净值趋势",
+            chart_line_config(
+                f"{name} 近3年净值趋势",
+                [rows_to_series(three_year_rows, "净值", color, use_trend=True)],
+                max_points=90,
+            ),
+        ),
+        (
+            f"{name} 近7个净值日涨跌",
+            chart_bar_config(f"{name} 近7个净值日涨跌", rows, color),
+        ),
+        (
+            f"{name} 回撤曲线",
+            chart_line_config(
+                f"{name} 回撤曲线",
+                [points_to_series(build_drawdown_points(three_year_rows), "回撤", "#ef4444")],
+                y_suffix="%",
+                max_points=90,
+            ),
+        ),
+    ]
+
+    compare_series = [
+        rows_to_series(three_year_rows, name, color, normalize=True, use_trend=True)
+    ]
+    for benchmark in benchmarks:
+        compare_series.append(
+            rows_to_series(
+                benchmark["rows"],
+                benchmark["label"],
+                benchmark["color"],
+                days=365 * 3,
+                normalize=True,
+                use_trend=benchmark.get("use_trend", False),
+            )
+        )
+    chart_specs.append(
+        (
+            f"{name} vs 基准",
+            chart_line_config(f"{name} vs 沪深300 / 纳斯达克100 / 标普500", compare_series, y_suffix="%", max_points=90),
+        )
+    )
+
+    images = []
+    for alt, config in chart_specs:
+        images.append(image_html(quickchart_url(config), alt))
+        time.sleep(0.12)
+    return "".join(images)
+
+
 def summarize(rows, estimate, holding=None):
     latest = rows[-1]
     trend_values = [trend_value(x) for x in rows]
@@ -907,7 +1084,7 @@ def build_report(items, benchmarks, config):
 </html>"""
 
 
-def build_pushplus_report(items, config):
+def build_pushplus_report(items, benchmarks, config):
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     title = config.get("title", "美股指数基金定投日报")
     rows = []
@@ -956,6 +1133,7 @@ def build_pushplus_report(items, config):
   {holding_lines}
   <p>操作提示：<b>{html.escape(signal)}</b></p>
   <p>{html.escape(advice)}</p>
+  {pushplus_chart_images(item, benchmarks)}
 </section>"""
         )
 
@@ -976,7 +1154,7 @@ def build_pushplus_report(items, config):
 </head>
 <body>
   <h1>{html.escape(title)}</h1>
-  <p class="note">生成时间：{now}。微信版为精简摘要；完整图表 HTML 已在 GitHub Actions 的 report artifact 中生成。</p>
+  <p class="note">生成时间：{now}。图表为微信友好图片版；完整 HTML 同步生成在 GitHub Actions 的 report artifact 中。</p>
   {''.join(cards)}
   <table>
     <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近1月</th><th>近3年</th><th>最大回撤</th></tr></thead>
@@ -1079,7 +1257,7 @@ def main():
     title = f"{config.get('title', '美股指数基金定投日报')} {today}"
     print(f"report={out_path}")
     if args.send and not args.dry_run:
-        push_content = build_pushplus_report(items, config)
+        push_content = build_pushplus_report(items, benchmarks, config)
         print(f"pushplus_content_chars={len(push_content)}")
         result = send_pushplus(config, title, push_content)
         print(result)
