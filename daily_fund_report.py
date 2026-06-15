@@ -11,6 +11,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -22,9 +23,22 @@ INDEX_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 QUICKCHART_CREATE_URL = "https://quickchart.io/chart/create"
 DEFAULT_HISTORY_DAYS = 1200
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
+DEFAULT_STATE_FILE = BASE_DIR / ".github" / "fund-report-state.json"
 DEFAULT_BENCHMARKS = [
-    {"type": "fund", "code": "513300", "label": "纳斯达克100ETF", "color": "#7c3aed"},
+    {"type": "fund", "code": "513300", "label": "参考基准：纳斯达克100ETF", "color": "#7c3aed"},
 ]
+
+
+def china_now():
+    return dt.datetime.now(CHINA_TZ)
+
+
+def resolve_path(path_value):
+    path = Path(path_value)
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return path
 
 
 def load_config():
@@ -34,13 +48,17 @@ def load_config():
                 config = json.load(f)
             config["_path"] = str(path)
             config.setdefault("history_days", DEFAULT_HISTORY_DAYS)
+            config.setdefault(
+                "source_note",
+                "主数据固定使用支付宝可购买的基金代码 270042（广发纳斯达克100ETF联接A）净值口径；基准图只作参考，不把美股纳斯达克指数当作你的持仓数据。",
+            )
             if "benchmarks" not in config:
                 config["benchmarks"] = [dict(item) for item in DEFAULT_BENCHMARKS]
             return config
     raise FileNotFoundError("Missing config.local.json or config.json")
 
 
-def http_get(url, timeout=20, encoding="utf-8", retries=3, referer="https://fund.eastmoney.com/"):
+def http_get(url, timeout=25, encoding="utf-8", retries=4, referer="https://fund.eastmoney.com/"):
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -59,15 +77,15 @@ def http_get(url, timeout=20, encoding="utf-8", retries=3, referer="https://fund
             last_error = exc
             if attempt == retries:
                 break
-            time.sleep(0.8 * attempt)
+            time.sleep(1.2 * attempt)
     raise last_error
 
 
-def http_post_json(url, payload, timeout=20, retries=3):
+def http_post_json(url, payload, timeout=30, retries=4):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
         "Content-Type": "application/json;charset=utf-8",
-        "User-Agent": "CodexFundReport/2.0",
+        "User-Agent": "CodexFundReport/3.0",
     }
     last_error = None
     for attempt in range(1, retries + 1):
@@ -79,11 +97,11 @@ def http_post_json(url, payload, timeout=20, retries=3):
             last_error = exc
             if attempt == retries:
                 break
-            time.sleep(0.8 * attempt)
+            time.sleep(1.2 * attempt)
     raise last_error
 
 
-def quickchart_url(chart_config, width=760, height=360):
+def quickchart_url(chart_config, width=760, height=380):
     payload = {
         "chart": chart_config,
         "width": width,
@@ -91,7 +109,7 @@ def quickchart_url(chart_config, width=760, height=360):
         "format": "png",
         "backgroundColor": "white",
     }
-    result = http_post_json(QUICKCHART_CREATE_URL, payload, timeout=30)
+    result = http_post_json(QUICKCHART_CREATE_URL, payload, timeout=35, retries=3)
     data = json.loads(result)
     if not data.get("success") or not data.get("url"):
         raise RuntimeError(f"QuickChart 生成失败: {result}")
@@ -139,7 +157,7 @@ def parse_fund_history(text):
 
 
 def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
-    end = dt.date.today()
+    end = china_now().date()
     start = end - dt.timedelta(days=days)
     rows = []
     seen_dates = set()
@@ -167,7 +185,7 @@ def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
                 rows.append(row)
                 seen_dates.add(row["date"])
         page += 1
-        time.sleep(0.08)
+        time.sleep(0.06)
     if not rows:
         raise RuntimeError(f"未取得基金 {code} 的历史净值")
     return sorted(rows, key=lambda x: x["date"])
@@ -196,7 +214,7 @@ def fetch_estimate(code):
 
 
 def fetch_index_history(secid, days=DEFAULT_HISTORY_DAYS):
-    end = dt.date.today()
+    end = china_now().date()
     start = end - dt.timedelta(days=days)
     params = {
         "secid": secid,
@@ -208,17 +226,7 @@ def fetch_index_history(secid, days=DEFAULT_HISTORY_DAYS):
         "end": end.strftime("%Y%m%d"),
     }
     url = INDEX_HISTORY_URL + "?" + urllib.parse.urlencode(params)
-    last_error = None
-    for attempt in range(1, 4):
-        try:
-            with urllib.request.urlopen(url, timeout=20) as resp:
-                text = resp.read().decode("utf-8", errors="ignore")
-            break
-        except Exception as exc:
-            last_error = exc
-            if attempt == 3:
-                raise last_error
-            time.sleep(0.8 * attempt)
+    text = http_get(url, referer="https://quote.eastmoney.com/")
     payload = json.loads(text)
     data = payload.get("data") or {}
     rows = []
@@ -320,33 +328,33 @@ def color_for(value):
     return "#d92d20" if value >= 0 else "#039855"
 
 
+def direction_text(value):
+    if value is None:
+        return "暂无涨跌数据"
+    if value > 0:
+        return "上涨"
+    if value < 0:
+        return "下跌"
+    return "持平"
+
+
 def sample_rows(rows, max_points):
     if len(rows) <= max_points:
         return rows
-    indexes = {
-        round(i * (len(rows) - 1) / (max_points - 1))
-        for i in range(max_points)
-    }
+    indexes = {round(i * (len(rows) - 1) / (max_points - 1)) for i in range(max_points)}
     return [row for idx, row in enumerate(rows) if idx in indexes]
 
 
 def sample_points(points, max_points):
     if len(points) <= max_points:
         return points
-    indexes = {
-        round(i * (len(points) - 1) / (max_points - 1))
-        for i in range(max_points)
-    }
+    indexes = {round(i * (len(points) - 1) / (max_points - 1)) for i in range(max_points)}
     return [point for idx, point in enumerate(points) if idx in indexes]
 
 
 def format_axis_value(value, value_kind):
     if value_kind == "pct":
         return f"{value:.0f}%"
-    if value_kind == "money":
-        if abs(value) >= 10000:
-            return f"{value / 10000:.1f}万"
-        return f"{value:.0f}"
     return f"{value:.2f}"
 
 
@@ -355,7 +363,7 @@ def svg_line(rows, width=760, height=220, color="#2563eb", fill_id="g", full_dat
         return ""
     if max_points:
         rows = sample_rows(rows, max_points)
-    pad_l, pad_r, pad_t, pad_b = 54, 18, 20, 34
+    pad_l, pad_r, pad_t, pad_b = 58, 18, 20, 36
     vals = [trend_value(r) for r in rows]
     v_min, v_max = min(vals), max(vals)
     if v_min == v_max:
@@ -372,97 +380,94 @@ def svg_line(rows, width=760, height=220, color="#2563eb", fill_id="g", full_dat
 
     points = [xy(i, trend_value(r)) for i, r in enumerate(rows)]
     poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
-    area = (
-        f"{pad_l:.1f},{height - pad_b:.1f} "
-        + poly
-        + f" {width - pad_r:.1f},{height - pad_b:.1f}"
-    )
+    area = f"{pad_l:.1f},{height - pad_b:.1f} " + poly + f" {width - pad_r:.1f},{height - pad_b:.1f}"
     grid = []
     labels = []
     for step in range(5):
         y = pad_t + plot_h * step / 4
         value = v_max - (v_max - v_min) * step / 4
         grid.append(f"<line x1='{pad_l}' y1='{y:.1f}' x2='{width - pad_r}' y2='{y:.1f}' />")
-        labels.append(
-            f"<text x='{pad_l - 8}' y='{y + 4:.1f}' text-anchor='end'>{value:.2f}</text>"
-        )
+        labels.append(f"<text x='{pad_l - 8}' y='{y + 4:.1f}' text-anchor='end'>{value:.2f}</text>")
     first_date = rows[0]["date"] if full_dates else rows[0]["date"][5:]
     last_date = rows[-1]["date"] if full_dates else rows[-1]["date"][5:]
     return f"""
 <svg viewBox="0 0 {width} {height}" class="chart" role="img">
   <defs>
     <linearGradient id="{fill_id}" x1="0" x2="0" y1="0" y2="1">
-      <stop offset="0%" stop-color="{color}" stop-opacity="0.24"/>
-      <stop offset="100%" stop-color="{color}" stop-opacity="0.02"/>
+      <stop offset="0%" stop-color="{color}" stop-opacity="0.26"/>
+      <stop offset="100%" stop-color="{color}" stop-opacity="0.03"/>
     </linearGradient>
   </defs>
   <g class="grid">{''.join(grid)}</g>
   <g class="axis-label">{''.join(labels)}</g>
   <polygon points="{area}" fill="url(#{fill_id})"/>
-  <polyline points="{poly}" fill="none" stroke="{color}" stroke-width="3.2"
+  <polyline points="{poly}" fill="none" stroke="{color}" stroke-width="4"
     stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="{points[-1][0]:.1f}" cy="{points[-1][1]:.1f}" r="4.4" fill="{color}"/>
-  <text x="{pad_l}" y="{height - 9}" class="date-label">{first_date}</text>
-  <text x="{width - pad_r}" y="{height - 9}" text-anchor="end" class="date-label">{last_date}</text>
+  <circle cx="{points[-1][0]:.1f}" cy="{points[-1][1]:.1f}" r="5" fill="{color}"/>
+  <text x="{pad_l}" y="{height - 10}" class="date-label">{first_date}</text>
+  <text x="{width - pad_r}" y="{height - 10}" text-anchor="end" class="date-label">{last_date}</text>
 </svg>"""
 
 
-def svg_bars(rows, width=760, height=190):
+def svg_bars(rows, width=760, height=230):
     rows = rows[-7:]
     if not rows:
         return ""
-    pad_l, pad_r, pad_t, pad_b = 40, 18, 22, 36
+    pad_l, pad_r, pad_t, pad_b = 46, 18, 28, 42
     vals = [row["growth"] if row.get("growth") is not None else 0 for row in rows]
-    limit = max(1.0, max(abs(v) for v in vals) * 1.25)
-    zero_y = pad_t + (limit / (2 * limit)) * (height - pad_t - pad_b)
-    bar_w = (width - pad_l - pad_r) / max(1, len(rows)) * 0.56
+    limit = max(0.25, max(abs(v) for v in vals) * 1.35)
+    plot_h = height - pad_t - pad_b
+    zero_y = pad_t + plot_h / 2
+    bar_w = (width - pad_l - pad_r) / max(1, len(rows)) * 0.62
     gap = (width - pad_l - pad_r) / max(1, len(rows))
     bars = []
     for i, (row, val) in enumerate(zip(rows, vals)):
         x = pad_l + i * gap + (gap - bar_w) / 2
-        y = pad_t + (limit - val) / (2 * limit) * (height - pad_t - pad_b)
+        y = pad_t + (limit - val) / (2 * limit) * plot_h
         h = abs(y - zero_y)
         top = min(y, zero_y)
         bar_color = color_for(val)
+        label_y = max(14, top - 8) if val >= 0 else min(height - 24, top + h + 18)
         bars.append(
-            f"<rect x='{x:.1f}' y='{top:.1f}' width='{bar_w:.1f}' height='{max(h, 2):.1f}' "
-            f"rx='5' fill='{bar_color}'/>"
-            f"<text x='{x + bar_w / 2:.1f}' y='{top - 7 if val >= 0 else top + h + 15:.1f}' "
-            f"text-anchor='middle' class='bar-value'>{fmt_pct(val)}</text>"
-            f"<text x='{x + bar_w / 2:.1f}' y='{height - 11}' text-anchor='middle' class='date-label'>{row['date'][5:]}</text>"
+            f"<rect x='{x:.1f}' y='{top:.1f}' width='{bar_w:.1f}' height='{max(h, 4):.1f}' "
+            f"rx='6' fill='{bar_color}'/>"
+            f"<text x='{x + bar_w / 2:.1f}' y='{label_y:.1f}' text-anchor='middle' "
+            f"class='bar-value' fill='{bar_color}'>{fmt_pct(val)}</text>"
+            f"<text x='{x + bar_w / 2:.1f}' y='{height - 13}' text-anchor='middle' class='date-label'>{row['date'][5:]}</text>"
         )
     return f"""
 <svg viewBox="0 0 {width} {height}" class="chart" role="img">
+  <line x1="{pad_l}" y1="{pad_t}" x2="{width - pad_r}" y2="{pad_t}" class="guide-line"/>
   <line x1="{pad_l}" y1="{zero_y:.1f}" x2="{width - pad_r}" y2="{zero_y:.1f}" class="zero-line"/>
+  <line x1="{pad_l}" y1="{height - pad_b}" x2="{width - pad_r}" y2="{height - pad_b}" class="guide-line"/>
+  <text x="{pad_l - 8}" y="{pad_t + 4}" text-anchor="end" class="date-label">+{limit:.2f}%</text>
+  <text x="{pad_l - 8}" y="{zero_y + 4:.1f}" text-anchor="end" class="date-label">0</text>
+  <text x="{pad_l - 8}" y="{height - pad_b + 4}" text-anchor="end" class="date-label">-{limit:.2f}%</text>
   {''.join(bars)}
 </svg>"""
 
 
-def svg_multi_line(series_list, width=760, height=250, value_kind="number", max_points=96):
+def svg_multi_line(series_list, width=760, height=270, value_kind="number", max_points=96, strong=False):
     prepared = []
     for series in series_list:
         points = [point for point in series.get("points", []) if point.get("value") is not None]
         if not points:
             continue
-        prepared.append(
-            {
-                "label": series["label"],
-                "color": series["color"],
-                "points": sample_points(points, max_points),
-            }
-        )
+        prepared.append({"label": series["label"], "color": series["color"], "points": sample_points(points, max_points)})
     if not prepared:
         return ""
 
-    pad_l, pad_r, pad_t, pad_b = 54, 18, 26, 38
+    pad_l, pad_r, pad_t, pad_b = 58, 18, 28, 40
     all_dates = [dt.date.fromisoformat(point["date"]).toordinal() for series in prepared for point in series["points"]]
     all_values = [point["value"] for series in prepared for point in series["points"]]
     d_min, d_max = min(all_dates), max(all_dates)
     v_min, v_max = min(all_values), max(all_values)
+    if value_kind == "pct":
+        v_max = max(v_max, 0)
     if d_min == d_max:
         d_max += 1
     if v_min == v_max:
-        span = abs(v_min) * 0.03 or 1
+        span = abs(v_min) * 0.08 or 1
         v_min -= span
         v_max += span
     plot_w = width - pad_l - pad_r
@@ -480,24 +485,28 @@ def svg_multi_line(series_list, width=760, height=250, value_kind="number", max_
         y = pad_t + plot_h * step / 4
         value = v_max - (v_max - v_min) * step / 4
         grid.append(f"<line x1='{pad_l}' y1='{y:.1f}' x2='{width - pad_r}' y2='{y:.1f}' />")
-        labels.append(
-            f"<text x='{pad_l - 8}' y='{y + 4:.1f}' text-anchor='end'>{format_axis_value(value, value_kind)}</text>"
-        )
+        labels.append(f"<text x='{pad_l - 8}' y='{y + 4:.1f}' text-anchor='end'>{format_axis_value(value, value_kind)}</text>")
+
+    if v_min < 0 < v_max:
+        zero_y = pad_t + (v_max / (v_max - v_min)) * plot_h
+        grid.append(f"<line x1='{pad_l}' y1='{zero_y:.1f}' x2='{width - pad_r}' y2='{zero_y:.1f}' class='zero-line' />")
 
     polylines = []
     legends = []
+    stroke_width = "4.4" if strong else "3.4"
+    radius = "5" if strong else "4"
     for idx, series in enumerate(prepared):
         points = [xy(point) for point in series["points"]]
         poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
         polylines.append(
-            f"<polyline points='{poly}' fill='none' stroke='{series['color']}' stroke-width='3' "
+            f"<polyline points='{poly}' fill='none' stroke='{series['color']}' stroke-width='{stroke_width}' "
             f"stroke-linecap='round' stroke-linejoin='round'/>"
-            f"<circle cx='{points[-1][0]:.1f}' cy='{points[-1][1]:.1f}' r='3.8' fill='{series['color']}'/>"
+            f"<circle cx='{points[-1][0]:.1f}' cy='{points[-1][1]:.1f}' r='{radius}' fill='{series['color']}'/>"
         )
-        legend_x = pad_l + idx * 160
+        legend_x = pad_l + idx * 190
         legends.append(
-            f"<rect x='{legend_x}' y='4' width='12' height='12' rx='3' fill='{series['color']}'/>"
-            f"<text x='{legend_x + 18}' y='14' fill='#475467' font-size='12'>{html.escape(series['label'])}</text>"
+            f"<rect x='{legend_x}' y='5' width='12' height='12' rx='3' fill='{series['color']}'/>"
+            f"<text x='{legend_x + 18}' y='15' fill='#475467' font-size='12'>{html.escape(series['label'])}</text>"
         )
 
     first_date = dt.date.fromordinal(d_min).isoformat()
@@ -508,8 +517,8 @@ def svg_multi_line(series_list, width=760, height=250, value_kind="number", max_
   <g class="grid">{''.join(grid)}</g>
   <g class="axis-label">{''.join(labels)}</g>
   {''.join(polylines)}
-  <text x="{pad_l}" y="{height - 10}" class="date-label">{first_date}</text>
-  <text x="{width - pad_r}" y="{height - 10}" text-anchor="end" class="date-label">{last_date}</text>
+  <text x="{pad_l}" y="{height - 11}" class="date-label">{first_date}</text>
+  <text x="{width - pad_r}" y="{height - 11}" text-anchor="end" class="date-label">{last_date}</text>
 </svg>"""
 
 
@@ -536,18 +545,18 @@ def sample_chart_points(points, max_points):
     return [point for point in sampled if point.get("value") is not None]
 
 
-def quickchart_tick_options(y_suffix=""):
-    ticks = {
-        "fontColor": "#667085",
-        "fontSize": 11,
-        "padding": 6,
-    }
+def quickchart_tick_options(y_suffix="", min_value=None, max_value=None):
+    ticks = {"fontColor": "#667085", "fontSize": 11, "padding": 6}
+    if min_value is not None:
+        ticks["min"] = min_value
+    if max_value is not None:
+        ticks["max"] = max_value
     if y_suffix == "%":
-        ticks["suggestedMax"] = 100
+        ticks["callback"] = "function(value) { return value + '%'; }"
     return ticks
 
 
-def chart_line_config(title, series_list, y_suffix="", max_points=80):
+def chart_line_config(title, series_list, y_suffix="", max_points=90, strong=False, min_value=None, max_value=None):
     labels = []
     datasets = []
     for series in series_list:
@@ -563,7 +572,7 @@ def chart_line_config(title, series_list, y_suffix="", max_points=80):
                 "data": values,
                 "borderColor": series["color"],
                 "backgroundColor": series["color"],
-                "borderWidth": 2.2,
+                "borderWidth": 3.8 if strong else 2.8,
                 "pointRadius": 0,
                 "fill": False,
                 "tension": 0.15,
@@ -577,39 +586,20 @@ def chart_line_config(title, series_list, y_suffix="", max_points=80):
             "responsive": True,
             "maintainAspectRatio": False,
             "layout": {"padding": {"left": 10, "right": 14, "top": 12, "bottom": 8}},
-            "title": {
-                "display": True,
-                "text": title,
-                "fontSize": 18,
-                "fontColor": "#111827",
-                "fontStyle": "600",
-                "padding": 16,
-            },
-            "legend": {
-                "display": len(datasets) > 1,
-                "position": "bottom",
-                "labels": {"boxWidth": 10, "fontColor": "#475467", "padding": 14},
-            },
+            "title": {"display": True, "text": title, "fontSize": 18, "fontColor": "#111827", "fontStyle": "600", "padding": 16},
+            "legend": {"display": len(datasets) > 1, "position": "bottom", "labels": {"boxWidth": 10, "fontColor": "#475467", "padding": 14}},
             "scales": {
-                "xAxes": [
-                    {
-                        "gridLines": {"display": False, "drawBorder": False},
-                        "ticks": {"maxTicksLimit": 6, "fontColor": "#667085", "fontSize": 10},
-                    }
-                ],
-                "yAxes": [
-                    {
-                        "gridLines": {"color": "#eef2f6", "drawBorder": False},
-                        "ticks": quickchart_tick_options(y_suffix),
-                    }
-                ],
+                "xAxes": [{"gridLines": {"display": False, "drawBorder": False}, "ticks": {"maxTicksLimit": 6, "fontColor": "#667085", "fontSize": 10}}],
+                "yAxes": [{"gridLines": {"color": "#eef2f6", "drawBorder": False}, "ticks": quickchart_tick_options(y_suffix, min_value, max_value)}],
             },
         },
     }
 
 
-def chart_bar_config(title, rows, color="#2563eb"):
+def chart_bar_config(title, rows):
     rows = rows[-7:]
+    vals = [row["growth"] if row.get("growth") is not None else 0 for row in rows]
+    limit = max(0.25, max(abs(v) for v in vals) * 1.35) if vals else 1
     return {
         "type": "bar",
         "data": {
@@ -617,11 +607,10 @@ def chart_bar_config(title, rows, color="#2563eb"):
             "datasets": [
                 {
                     "label": "日涨跌",
-                    "data": [row["growth"] if row.get("growth") is not None else 0 for row in rows],
-                    "backgroundColor": [
-                        "#d92d20" if (row.get("growth") or 0) >= 0 else "#039855"
-                        for row in rows
-                    ],
+                    "data": vals,
+                    "backgroundColor": ["#d92d20" if val >= 0 else "#039855" for val in vals],
+                    "barPercentage": 0.72,
+                    "categoryPercentage": 0.72,
                 }
             ],
         },
@@ -629,28 +618,11 @@ def chart_bar_config(title, rows, color="#2563eb"):
             "responsive": True,
             "maintainAspectRatio": False,
             "layout": {"padding": {"left": 10, "right": 14, "top": 12, "bottom": 8}},
-            "title": {
-                "display": True,
-                "text": title,
-                "fontSize": 18,
-                "fontColor": "#111827",
-                "fontStyle": "600",
-                "padding": 16,
-            },
+            "title": {"display": True, "text": title, "fontSize": 18, "fontColor": "#111827", "fontStyle": "600", "padding": 16},
             "legend": {"display": False},
             "scales": {
-                "xAxes": [
-                    {
-                        "gridLines": {"display": False, "drawBorder": False},
-                        "ticks": {"fontColor": "#667085", "fontSize": 10},
-                    }
-                ],
-                "yAxes": [
-                    {
-                        "gridLines": {"color": "#eef2f6", "drawBorder": False},
-                        "ticks": quickchart_tick_options("%"),
-                    }
-                ],
+                "xAxes": [{"gridLines": {"display": False, "drawBorder": False}, "ticks": {"fontColor": "#667085", "fontSize": 11}}],
+                "yAxes": [{"gridLines": {"color": "#eef2f6", "drawBorder": False, "zeroLineColor": "#98a2b3"}, "ticks": quickchart_tick_options("%", -limit, limit)}],
             },
         },
     }
@@ -684,48 +656,37 @@ def image_html(url, alt):
 def pushplus_chart_images(item, benchmarks):
     fund = item["fund"]
     rows = item["rows"]
-    summary = item["summary"]
     estimate = item["estimate"] or {}
     name = fund.get("label") or estimate.get("name") or fund["code"]
     color = fund.get("color", "#2563eb")
+    seven_rows = rows[-7:]
     one_month_rows = rows_since_calendar_days(rows, 30)
+    one_year_rows = rows_since_calendar_days(rows, 365)
     three_year_rows = rows_since_calendar_days(rows, 365 * 3)
+    drawdown_points = build_drawdown_points(three_year_rows)
+    min_drawdown = min((point["value"] for point in drawdown_points), default=-1)
 
     chart_specs = [
-        (
-            f"{name} 近1个月净值趋势",
-            chart_line_config(
-                f"{name} 近1个月净值趋势",
-                [rows_to_series(one_month_rows, "净值", color, use_trend=True)],
-                max_points=40,
-            ),
-        ),
-        (
-            f"{name} 近3年净值趋势",
-            chart_line_config(
-                f"{name} 近3年净值趋势",
-                [rows_to_series(three_year_rows, "净值", color, use_trend=True)],
-                max_points=90,
-            ),
-        ),
-        (
-            f"{name} 近7个净值日涨跌",
-            chart_bar_config(f"{name} 近7个净值日涨跌", rows, color),
-        ),
+        (f"{name} 近7个净值日趋势", chart_line_config(f"{name} 近7个净值日趋势", [rows_to_series(seven_rows, "净值", color, use_trend=True)], max_points=7, strong=True)),
+        (f"{name} 近7个净值日涨跌", chart_bar_config(f"{name} 近7个净值日涨跌", rows)),
+        (f"{name} 近1个月净值趋势", chart_line_config(f"{name} 近1个月净值趋势", [rows_to_series(one_month_rows, "净值", color, use_trend=True)], max_points=42, strong=True)),
+        (f"{name} 近1年净值趋势", chart_line_config(f"{name} 近1年净值趋势", [rows_to_series(one_year_rows, "净值", color, use_trend=True)], max_points=90, strong=True)),
+        (f"{name} 近3年净值趋势", chart_line_config(f"{name} 近3年净值趋势", [rows_to_series(three_year_rows, "净值", color, use_trend=True)], max_points=110, strong=True)),
         (
             f"{name} 回撤曲线",
             chart_line_config(
                 f"{name} 回撤曲线",
-                [points_to_series(build_drawdown_points(three_year_rows), "回撤", "#ef4444")],
+                [points_to_series(drawdown_points, "回撤", "#b42318")],
                 y_suffix="%",
-                max_points=90,
+                max_points=110,
+                strong=True,
+                min_value=math.floor(min_drawdown),
+                max_value=0,
             ),
         ),
     ]
 
-    compare_series = [
-        rows_to_series(three_year_rows, name, color, normalize=True, use_trend=True)
-    ]
+    compare_series = [rows_to_series(three_year_rows, name, color, normalize=True, use_trend=True)]
     for benchmark in benchmarks:
         compare_series.append(
             rows_to_series(
@@ -737,17 +698,17 @@ def pushplus_chart_images(item, benchmarks):
                 use_trend=benchmark.get("use_trend", False),
             )
         )
-    chart_specs.append(
-        (
-            f"{name} vs 基准",
-            chart_line_config(f"{name} vs 纳斯达克100ETF", compare_series, y_suffix="%", max_points=90),
-        )
-    )
+    if len(compare_series) > 1:
+        chart_specs.append((f"{name} vs 参考基准", chart_line_config(f"{name} vs 参考基准", compare_series, y_suffix="%", max_points=110)))
 
     images = []
     for alt, config in chart_specs:
-        images.append(image_html(quickchart_url(config), alt))
-        time.sleep(0.12)
+        try:
+            images.append(image_html(quickchart_url(config), alt))
+            time.sleep(0.12)
+        except Exception as exc:
+            print(f"WARN: chart failed {alt}: {exc}", file=sys.stderr)
+            images.append(f"<p class='note'>图表生成失败：{html.escape(alt)}。文字数据仍已正常生成。</p>")
     return "".join(images)
 
 
@@ -756,6 +717,7 @@ def summarize(rows, estimate):
     trend_values = [trend_value(x) for x in rows]
     latest_growth = latest.get("growth")
     estimate_growth = estimate.get("estimate_growth") if estimate else None
+    seven_rows = rows[-7:]
     one_year_rows = rows_since_calendar_days(rows, 365)
     thirty_day_rows = rows_since_calendar_days(rows, 30)
     three_year_rows = rows_since_calendar_days(rows, 365 * 3)
@@ -766,9 +728,11 @@ def summarize(rows, estimate):
         "latest_nav": latest["nav"],
         "latest_trend_nav": trend_value(latest),
         "latest_growth": latest_growth,
+        "daily_change": estimate_growth if estimate_growth is not None else latest_growth,
+        "daily_change_label": "估算涨跌" if estimate_growth is not None else "净值日涨跌",
         "estimate_growth": estimate_growth,
         "estimate_time": estimate.get("estimate_time", "") if estimate else "",
-        "return_7d": pct_change(trend_value(rows[-7]), trend_value(latest)) if len(rows) >= 7 else None,
+        "return_7d": pct_change(trend_value(seven_rows[0]), trend_value(latest)) if len(seven_rows) > 1 else None,
         "return_30d": pct_change(trend_value(thirty_day_rows[0]), trend_value(latest)) if len(thirty_day_rows) > 1 else None,
         "return_1y": pct_change(trend_value(one_year_rows[0]), trend_value(latest)) if len(one_year_rows) > 1 else None,
         "return_3y": pct_change(trend_value(three_year_rows[0]), trend_value(latest)) if len(three_year_rows) > 1 else None,
@@ -784,9 +748,7 @@ def summarize(rows, estimate):
 
 
 def make_signal(summary, latest_nav):
-    growth = summary.get("estimate_growth")
-    if growth is None:
-        growth = summary.get("latest_growth")
+    growth = summary.get("daily_change")
     r7 = summary.get("return_7d")
     r30 = summary.get("return_30d")
     ma20 = summary.get("ma20")
@@ -810,14 +772,41 @@ def metric_cell(label, value, color=None):
     return f"<div><span>{html.escape(label)}</span><strong{style}>{value}</strong></div>"
 
 
+def change_panel(summary):
+    value = summary.get("daily_change")
+    color = color_for(value)
+    label = summary.get("daily_change_label") or "涨跌"
+    source = summary.get("estimate_time") if summary.get("estimate_growth") is not None else summary.get("latest_date")
+    return f"""
+  <div class="change-panel" style="border-color:{color}55;background:{color}10;">
+    <div>
+      <span>{html.escape(label)}</span>
+      <b style="color:{color};">{direction_text(value)}</b>
+      <small>{html.escape(source or '最新可得数据')}</small>
+    </div>
+    <strong style="color:{color};">{fmt_pct(value)}</strong>
+  </div>"""
+
+
+def build_compare_series(item, benchmarks, days=365 * 3):
+    fund = item["fund"]
+    rows = item["rows"]
+    estimate = item["estimate"] or {}
+    name = fund.get("label") or estimate.get("name") or fund["code"]
+    series = [rows_to_series(rows_since_calendar_days(rows, days), name, fund.get("color", "#2563eb"), normalize=True, use_trend=True)]
+    for benchmark in benchmarks:
+        series.append(rows_to_series(benchmark["rows"], benchmark["label"], benchmark["color"], days=days, normalize=True, use_trend=benchmark.get("use_trend", False)))
+    return series
+
+
 def build_card(item, benchmarks, index):
     fund = item["fund"]
     rows = item["rows"]
     summary = item["summary"]
     estimate = item["estimate"] or {}
     signal, advice = summary["signal"]
-    latest_color = color_for(summary.get("estimate_growth", summary.get("latest_growth")))
     name = fund.get("label") or estimate.get("name") or fund["code"]
+    color = fund.get("color", "#2563eb")
     source_note = (
         f"估算 {fmt_pct(summary['estimate_growth'])} · {summary['estimate_time']}"
         if summary.get("estimate_growth") is not None
@@ -827,63 +816,48 @@ def build_card(item, benchmarks, index):
     metrics = [
         metric_cell("最新净值", fmt_num(summary["latest_nav"])),
         metric_cell("净值日期", summary["latest_date"]),
-        metric_cell("近1月收益率", fmt_pct(summary["return_30d"]), color_for(summary["return_30d"])),
-        metric_cell("近3年收益率", fmt_pct(summary["return_3y"]), color_for(summary["return_3y"])),
-        metric_cell("最大回撤", fmt_pct(summary["drawdown_3y"], signed=False)),
+        metric_cell("近7净值日", fmt_pct(summary["return_7d"]), color_for(summary["return_7d"])),
+        metric_cell("近1个月", fmt_pct(summary["return_30d"]), color_for(summary["return_30d"])),
+        metric_cell("近1年", fmt_pct(summary["return_1y"]), color_for(summary["return_1y"])),
+        metric_cell("近3年", fmt_pct(summary["return_3y"]), color_for(summary["return_3y"])),
+        metric_cell("近1年回撤", fmt_pct(summary["drawdown_1y"], signed=False)),
+        metric_cell("近3年最大回撤", fmt_pct(summary["drawdown_3y"], signed=False)),
         metric_cell("年化波动率", fmt_pct(summary["vol_3y"], signed=False)),
+        metric_cell("操作提示", html.escape(signal)),
     ]
-    metrics.append(metric_cell("操作提示", html.escape(signal)))
 
+    seven_rows = rows[-7:]
     one_month_rows = rows_since_calendar_days(rows, 30)
+    one_year_rows = rows_since_calendar_days(rows, 365)
     three_year_rows = rows_since_calendar_days(rows, 365 * 3)
-
-    compare_series = [
-        rows_to_series(
-            three_year_rows,
-            name,
-            fund.get("color", "#2563eb"),
-            normalize=True,
-            use_trend=True,
-        )
-    ]
-    for benchmark in benchmarks:
-        compare_series.append(
-            rows_to_series(
-                benchmark["rows"],
-                benchmark["label"],
-                benchmark["color"],
-                days=365 * 3,
-                normalize=True,
-                use_trend=benchmark.get("use_trend", False),
-            )
-        )
+    compare_series = build_compare_series(item, benchmarks)
 
     return f"""
 <section class="fund-card">
   <div class="fund-head">
     <div>
-      <div class="fund-kicker">{html.escape(fund['code'])}</div>
+      <div class="fund-kicker">{html.escape(fund['code'])} · 支付宝基金口径</div>
       <h2>{html.escape(name)}</h2>
       <p>{html.escape(source_note)}</p>
     </div>
-    <div class="today-pill" style="color:{latest_color};border-color:{latest_color}33;background:{latest_color}12">
-      {fmt_pct(summary.get('estimate_growth', summary.get('latest_growth')))}
-    </div>
   </div>
+  {change_panel(summary)}
   <div class="metrics">{''.join(metrics)}</div>
   <div class="advice">{html.escape(advice)}</div>
   <h3>近7个净值日趋势</h3>
-  {svg_line(rows[-7:], height=190, color=fund.get("color", "#2563eb"), fill_id=f"fill7{index}")}
+  {svg_line(seven_rows, height=200, color=color, fill_id=f"fill7{index}")}
   <h3>近7个净值日涨跌</h3>
   {svg_bars(rows)}
   <h3>近1个月净值趋势图</h3>
-  {svg_line(one_month_rows, color=fund.get("color", "#2563eb"), fill_id=f"fill1m{index}", full_dates=True, max_points=40)}
+  {svg_line(one_month_rows, color=color, fill_id=f"fill1m{index}", full_dates=True, max_points=42)}
+  <h3>近1年净值趋势图</h3>
+  {svg_line(one_year_rows, color=color, fill_id=f"fill1y{index}", full_dates=True, max_points=96)}
   <h3>近3年净值趋势图</h3>
-  {svg_line(three_year_rows, color=fund.get("color", "#2563eb"), fill_id=f"fill3y{index}", full_dates=True, max_points=96)}
+  {svg_line(three_year_rows, color=color, fill_id=f"fill3y{index}", full_dates=True, max_points=110)}
   <h3>回撤曲线</h3>
-  {svg_multi_line([points_to_series(build_drawdown_points(three_year_rows), "回撤", "#ef4444")], value_kind="pct")}
-  <h3>基金 vs 纳斯达克100ETF 对比图</h3>
-  {svg_multi_line(compare_series, value_kind="pct")}
+  {svg_multi_line([points_to_series(build_drawdown_points(three_year_rows), "回撤", "#b42318")], value_kind="pct", strong=True)}
+  <h3>基金 vs 参考基准对比图</h3>
+  {svg_multi_line(compare_series, value_kind="pct") if len(compare_series) > 1 else '<p class="note">未配置参考基准。</p>'}
 </section>"""
 
 
@@ -901,16 +875,17 @@ def market_temperature(items):
     return round(sum(scores) / len(scores))
 
 
-def build_report(items, benchmarks, config):
-    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
-    temp = market_temperature(items)
+def temperature_text(temp, long=False):
     if temp >= 68:
-        temp_text = "偏热，新增资金宜克制追涨"
-    elif temp <= 38:
-        temp_text = "偏冷，定投资金可更从容分批"
-    else:
-        temp_text = "中性，按计划执行更优"
+        return "偏热，新增资金宜克制追涨" if long else "偏热，控制追涨"
+    if temp <= 38:
+        return "偏冷，定投资金可更从容分批" if long else "偏冷，分批承接"
+    return "中性，按计划执行更优" if long else "中性，按计划执行"
 
+
+def build_report(items, benchmarks, config):
+    now = china_now().strftime("%Y-%m-%d %H:%M")
+    temp = market_temperature(items)
     title = config.get("title", "纳斯达克100基金定投日报")
     cards = "\n".join(build_card(item, benchmarks, idx) for idx, item in enumerate(items))
     data_rows = []
@@ -918,14 +893,16 @@ def build_report(items, benchmarks, config):
         fund = item["fund"]
         summary = item["summary"]
         name = fund.get("label") or (item["estimate"] or {}).get("name") or fund["code"]
+        daily_color = color_for(summary.get("daily_change"))
         data_rows.append(
             f"<tr><td>{html.escape(name)}</td><td>{summary['latest_date']}</td>"
             f"<td>{fmt_num(summary['latest_nav'])}</td>"
-            f"<td>{fmt_pct(summary.get('estimate_growth', summary.get('latest_growth')))}</td>"
+            f"<td style='color:{daily_color};font-weight:700'>{fmt_pct(summary.get('daily_change'))}</td>"
+            f"<td>{fmt_pct(summary['return_7d'])}</td>"
             f"<td>{fmt_pct(summary['return_30d'])}</td>"
+            f"<td>{fmt_pct(summary['return_1y'])}</td>"
             f"<td>{fmt_pct(summary['return_3y'])}</td>"
             f"<td>{fmt_pct(summary['drawdown_3y'], signed=False)}</td>"
-            f"<td>{fmt_pct(summary['vol_3y'], signed=False)}</td>"
             f"<td>{html.escape(summary['signal'][0])}</td></tr>"
         )
 
@@ -936,129 +913,62 @@ def build_report(items, benchmarks, config):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
 <style>
-  body {{
-    margin: 0;
-    background: #f4f7fb;
-    color: #101828;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-      "Microsoft YaHei", Arial, sans-serif;
-  }}
+  body {{ margin: 0; background: #f4f7fb; color: #101828; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }}
   .wrap {{ max-width: 920px; margin: 0 auto; padding: 24px 14px 34px; }}
-  .hero {{
-    padding: 26px 24px;
-    border-radius: 8px;
-    background: linear-gradient(135deg, #111827, #243b53 58%, #0f766e);
-    color: #fff;
-  }}
+  .hero {{ padding: 26px 24px; border-radius: 8px; background: linear-gradient(135deg, #111827, #243b53 58%, #0f766e); color: #fff; }}
   .hero h1 {{ margin: 0 0 8px; font-size: 28px; }}
   .hero p {{ margin: 0; color: #d9e8f2; line-height: 1.65; }}
-  .temp {{
-    display: inline-block;
-    margin-top: 16px;
-    padding: 9px 12px;
-    border: 1px solid rgba(255,255,255,.24);
-    border-radius: 6px;
-    background: rgba(255,255,255,.12);
-    font-weight: 700;
-  }}
-  .fund-card {{
-    margin-top: 18px;
-    padding: 22px;
-    border: 1px solid #e4e7ec;
-    border-radius: 8px;
-    background: #fff;
-    box-shadow: 0 12px 30px rgba(16, 24, 40, .06);
-  }}
+  .temp {{ display: inline-block; margin-top: 16px; padding: 9px 12px; border: 1px solid rgba(255,255,255,.24); border-radius: 6px; background: rgba(255,255,255,.12); font-weight: 700; }}
+  .fund-card {{ margin-top: 18px; padding: 22px; border: 1px solid #e4e7ec; border-radius: 8px; background: #fff; box-shadow: 0 12px 30px rgba(16, 24, 40, .06); }}
   .fund-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }}
   .fund-kicker {{ color: #667085; font-size: 13px; font-weight: 700; }}
   h2 {{ margin: 4px 0 4px; font-size: 22px; line-height: 1.25; }}
   h3 {{ margin: 22px 0 8px; font-size: 16px; color: #344054; }}
   .fund-head p {{ margin: 0; color: #667085; font-size: 13px; }}
-  .today-pill {{
-    min-width: 82px;
-    padding: 8px 10px;
-    border: 1px solid;
-    border-radius: 8px;
-    text-align: center;
-    font-size: 22px;
-    font-weight: 800;
-  }}
-  .metrics {{
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 10px;
-    margin-top: 18px;
-  }}
-  .metrics div {{
-    padding: 12px;
-    background: #f8fafc;
-    border: 1px solid #edf2f7;
-    border-radius: 8px;
-  }}
+  .change-panel {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; padding: 16px; border: 1px solid; border-radius: 8px; }}
+  .change-panel span, .change-panel small {{ display: block; color: #667085; font-size: 12px; }}
+  .change-panel b {{ display: block; margin: 4px 0 2px; font-size: 16px; }}
+  .change-panel strong {{ font-size: 34px; line-height: 1; white-space: nowrap; }}
+  .metrics {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 18px; }}
+  .metrics div {{ padding: 12px; background: #f8fafc; border: 1px solid #edf2f7; border-radius: 8px; }}
   .metrics span {{ display: block; color: #667085; font-size: 12px; margin-bottom: 5px; }}
   .metrics strong {{ font-size: 16px; }}
-  .advice {{
-    margin-top: 12px;
-    padding: 12px 14px;
-    border-left: 4px solid #0f766e;
-    background: #ecfdf3;
-    color: #184e44;
-    line-height: 1.7;
-    border-radius: 6px;
-  }}
+  .advice {{ margin-top: 12px; padding: 12px 14px; border-left: 4px solid #0f766e; background: #ecfdf3; color: #184e44; line-height: 1.7; border-radius: 6px; }}
   .chart {{ width: 100%; height: auto; display: block; overflow: visible; }}
   .grid line {{ stroke: #e5e7eb; stroke-width: 1; }}
-  .axis-label text, .date-label, .bar-value {{ fill: #667085; font-size: 12px; }}
+  .axis-label text, .date-label, .bar-value {{ fill: #667085; font-size: 12px; font-weight: 700; }}
   .legend text {{ fill: #475467; font-size: 12px; }}
-  .zero-line {{ stroke: #98a2b3; stroke-width: 1.2; stroke-dasharray: 4 4; }}
-  table {{
-    width: 100%;
-    margin-top: 18px;
-    border-collapse: collapse;
-    background: #fff;
-    border-radius: 8px;
-    overflow: hidden;
-  }}
+  .zero-line {{ stroke: #98a2b3; stroke-width: 1.4; stroke-dasharray: 4 4; }}
+  .guide-line {{ stroke: #edf2f7; stroke-width: 1; }}
+  table {{ width: 100%; margin-top: 18px; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; }}
   th, td {{ padding: 11px 9px; border-bottom: 1px solid #eaecf0; font-size: 13px; text-align: left; }}
   th {{ background: #111827; color: #fff; }}
   .note {{ margin-top: 16px; color: #667085; line-height: 1.7; font-size: 13px; }}
-  @media (max-width: 680px) {{
-    .fund-head {{ display: block; }}
-    .today-pill {{ margin-top: 12px; width: fit-content; }}
-    .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-    h2 {{ font-size: 19px; }}
-  }}
+  @media (max-width: 680px) {{ .fund-head {{ display: block; }} .change-panel {{ align-items: flex-start; }} .change-panel strong {{ font-size: 28px; }} .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} h2 {{ font-size: 19px; }} }}
 </style>
 </head>
 <body>
 <main class="wrap">
   <section class="hero">
     <h1>{html.escape(title)}</h1>
-    <p>生成时间：{now}。报告基于基金历史净值、估算净值与指数基准数据生成；QDII 基金会受海外市场、汇率与净值披露时差影响。</p>
-    <div class="temp">市场温度 {temp}/100 · {temp_text}</div>
+    <p>生成时间：{now}。{html.escape(config.get('source_note', '主数据固定使用基金代码 270042。'))}</p>
+    <div class="temp">市场温度 {temp}/100 · {temperature_text(temp, long=True)}</div>
   </section>
   {cards}
   <table>
-    <thead><tr><th>基金</th><th>净值日</th><th>最新净值</th><th>当日估算/涨跌</th><th>近1月</th><th>近3年</th><th>最大回撤</th><th>年化波动率</th><th>提示</th></tr></thead>
+    <thead><tr><th>基金</th><th>净值日</th><th>最新净值</th><th>当日涨跌</th><th>近7日</th><th>近1月</th><th>近1年</th><th>近3年</th><th>最大回撤</th><th>提示</th></tr></thead>
     <tbody>{''.join(data_rows)}</tbody>
   </table>
-  <p class="note">说明：红色代表上涨，绿色代表下跌。基准对比图使用归一化收益率展示趋势差异，仅作定投节奏参考，不构成个性化投资建议。</p>
+  <p class="note">说明：红色代表上涨，绿色代表下跌。主数据固定为支付宝可购买基金代码 270042（广发纳斯达克100ETF联接A）的净值/估算口径；参考基准仅用于趋势对照，不代表你的支付宝持仓数据。本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
 </main>
 </body>
 </html>"""
 
 
 def build_pushplus_report(items, benchmarks, config):
-    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = china_now().strftime("%Y-%m-%d %H:%M")
     title = config.get("title", "纳斯达克100基金定投日报")
     temp = market_temperature(items)
-    if temp >= 68:
-        temp_text = "偏热，控制追涨"
-    elif temp <= 38:
-        temp_text = "偏冷，分批承接"
-    else:
-        temp_text = "中性，按计划执行"
-
     rows = []
     cards = []
     for item in items:
@@ -1067,23 +977,23 @@ def build_pushplus_report(items, benchmarks, config):
         estimate = item["estimate"] or {}
         name = fund.get("label") or estimate.get("name") or fund["code"]
         signal, advice = summary["signal"]
+        daily = fmt_pct(summary.get("daily_change"))
+        daily_color = color_for(summary.get("daily_change"))
+        r7 = fmt_pct(summary["return_7d"])
         one_month = fmt_pct(summary["return_30d"])
+        one_year = fmt_pct(summary["return_1y"])
         three_year = fmt_pct(summary["return_3y"])
         drawdown = fmt_pct(summary["drawdown_3y"], signed=False)
         vol = fmt_pct(summary["vol_3y"], signed=False)
-        daily = fmt_pct(summary.get("estimate_growth", summary.get("latest_growth")))
-        daily_color = color_for(summary.get("estimate_growth", summary.get("latest_growth")))
-        month_color = color_for(summary["return_30d"])
-        year_color = color_for(summary["return_3y"])
 
         rows.append(
             "<tr>"
             f"<td>{html.escape(name)}</td>"
             f"<td>{summary['latest_date']}</td>"
             f"<td>{fmt_num(summary['latest_nav'])}</td>"
-            f"<td>{daily}</td>"
-            f"<td>{one_month}</td>"
-            f"<td>{three_year}</td>"
+            f"<td style='color:{daily_color};font-weight:700'>{daily}</td>"
+            f"<td>{r7}</td>"
+            f"<td>{one_year}</td>"
             f"<td>{drawdown}</td>"
             "</tr>"
         )
@@ -1092,18 +1002,24 @@ def build_pushplus_report(items, benchmarks, config):
 <section class="fund-card">
   <div class="fund-top">
     <div>
-      <div class="code">{html.escape(fund['code'])}</div>
+      <div class="code">{html.escape(fund['code'])} · 支付宝基金口径</div>
       <h2>{html.escape(name)}</h2>
       <p class="sub">净值日 {summary['latest_date']}</p>
     </div>
-    <div class="daily" style="color:{daily_color};background:{daily_color}12;border-color:{daily_color}33;">{daily}</div>
+  </div>
+  <div class="daily-box" style="border-color:{daily_color}55;background:{daily_color}10;">
+    <span>{html.escape(summary.get('daily_change_label') or '涨跌')}</span>
+    <b style="color:{daily_color};">{direction_text(summary.get('daily_change'))}</b>
+    <strong style="color:{daily_color};">{daily}</strong>
   </div>
   <div class="metric-grid">
     <div><span>最新净值</span><b>{fmt_num(summary['latest_nav'])}</b></div>
-    <div><span>近1月</span><b style="color:{month_color};">{one_month}</b></div>
-    <div><span>近3年</span><b style="color:{year_color};">{three_year}</b></div>
+    <div><span>近7净值日</span><b style="color:{color_for(summary['return_7d'])};">{r7}</b></div>
+    <div><span>近1个月</span><b style="color:{color_for(summary['return_30d'])};">{one_month}</b></div>
+    <div><span>近1年</span><b style="color:{color_for(summary['return_1y'])};">{one_year}</b></div>
+    <div><span>近3年</span><b style="color:{color_for(summary['return_3y'])};">{three_year}</b></div>
     <div><span>最大回撤</span><b>{drawdown}</b></div>
-    <div><span>年化波动率</span><b>{vol}</b></div>
+    <div><span>年化波动</span><b>{vol}</b></div>
     <div><span>操作提示</span><b>{html.escape(signal)}</b></div>
   </div>
   <div class="advice"><b>{html.escape(signal)}</b><p>{html.escape(advice)}</p></div>
@@ -1116,84 +1032,28 @@ def build_pushplus_report(items, benchmarks, config):
 <head>
 <meta charset="utf-8">
 <style>
-  body {{
-    margin: 0;
-    background: #f5f7fb;
-    color: #101828;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-      "Microsoft YaHei", Arial, sans-serif;
-  }}
+  body {{ margin: 0; background: #f5f7fb; color: #101828; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", Arial, sans-serif; }}
   .wrap {{ max-width: 760px; margin: 0 auto; padding: 14px 12px 22px; }}
-  .hero {{
-    padding: 20px 18px;
-    border-radius: 8px;
-    background: #111827;
-    color: #fff;
-  }}
+  .hero {{ padding: 20px 18px; border-radius: 8px; background: #111827; color: #fff; }}
   h1 {{ font-size: 22px; line-height: 1.25; margin: 0 0 8px; }}
   .hero p {{ margin: 0; color: #d0d5dd; font-size: 13px; line-height: 1.7; }}
-  .temperature {{
-    display: inline-block;
-    margin-top: 12px;
-    padding: 7px 10px;
-    border-radius: 6px;
-    background: rgba(255,255,255,.12);
-    border: 1px solid rgba(255,255,255,.18);
-    color: #fff;
-    font-size: 13px;
-    font-weight: 700;
-  }}
-  .fund-card {{
-    margin-top: 14px;
-    padding: 16px 14px;
-    border: 1px solid #e4e7ec;
-    border-radius: 8px;
-    background: #fff;
-  }}
+  .temperature {{ display: inline-block; margin-top: 12px; padding: 7px 10px; border-radius: 6px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.18); color: #fff; font-size: 13px; font-weight: 700; }}
+  .fund-card {{ margin-top: 14px; padding: 16px 14px; border: 1px solid #e4e7ec; border-radius: 8px; background: #fff; }}
   .fund-top {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }}
   .code {{ color: #667085; font-size: 12px; font-weight: 700; }}
   h2 {{ font-size: 19px; line-height: 1.3; margin: 4px 0 4px; }}
   .sub {{ margin: 0; color: #667085; font-size: 12px; }}
-  .daily {{
-    min-width: 72px;
-    padding: 7px 8px;
-    border: 1px solid;
-    border-radius: 8px;
-    text-align: center;
-    font-size: 20px;
-    font-weight: 800;
-  }}
-  .metric-grid {{
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-    margin-top: 14px;
-  }}
-  .metric-grid div {{
-    padding: 10px;
-    border-radius: 8px;
-    background: #f8fafc;
-    border: 1px solid #edf2f7;
-  }}
+  .daily-box {{ margin-top: 12px; padding: 13px 12px; border: 1px solid; border-radius: 8px; }}
+  .daily-box span {{ display: block; color: #667085; font-size: 12px; }}
+  .daily-box b {{ display: inline-block; margin-top: 4px; font-size: 15px; }}
+  .daily-box strong {{ float: right; font-size: 28px; line-height: 1.1; }}
+  .metric-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }}
+  .metric-grid div {{ padding: 10px; border-radius: 8px; background: #f8fafc; border: 1px solid #edf2f7; }}
   .metric-grid span {{ display: block; color: #667085; font-size: 12px; margin-bottom: 4px; }}
   .metric-grid b {{ font-size: 16px; }}
-  .advice {{
-    margin-top: 12px;
-    padding: 11px 12px;
-    border-left: 4px solid #2563eb;
-    background: #eff6ff;
-    border-radius: 7px;
-    color: #1d2939;
-    line-height: 1.65;
-  }}
+  .advice {{ margin-top: 12px; padding: 11px 12px; border-left: 4px solid #2563eb; background: #eff6ff; border-radius: 7px; color: #1d2939; line-height: 1.65; }}
   .advice p {{ margin: 4px 0 0; }}
-  .chart-card {{
-    margin-top: 12px;
-    padding: 8px;
-    border-radius: 8px;
-    border: 1px solid #e4e7ec;
-    background: #fff;
-  }}
+  .chart-card {{ margin-top: 12px; padding: 8px; border-radius: 8px; border: 1px solid #e4e7ec; background: #fff; }}
   table {{ width: 100%; border-collapse: collapse; margin-top: 14px; background: #fff; }}
   th, td {{ border-bottom: 1px solid #eaecf0; padding: 8px 6px; font-size: 12px; text-align: left; }}
   th {{ background: #111827; color: #fff; }}
@@ -1204,15 +1064,15 @@ def build_pushplus_report(items, benchmarks, config):
   <main class="wrap">
     <section class="hero">
       <h1>{html.escape(title)}</h1>
-      <p>生成时间：{now}。图表为微信友好图片版，完整 HTML 同步生成在 GitHub Actions 的 report artifact 中。</p>
-      <div class="temperature">市场温度 {temp}/100 · {temp_text}</div>
+      <p>生成时间：{now}。{html.escape(config.get('source_note', '主数据固定使用基金代码 270042。'))}</p>
+      <div class="temperature">市场温度 {temp}/100 · {temperature_text(temp)}</div>
     </section>
     {''.join(cards)}
     <table>
-      <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近1月</th><th>近3年</th><th>最大回撤</th></tr></thead>
+      <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近7日</th><th>近1年</th><th>最大回撤</th></tr></thead>
       <tbody>{''.join(rows)}</tbody>
     </table>
-    <p class="note">本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
+    <p class="note">主数据固定为支付宝可购买基金代码 270042（广发纳斯达克100ETF联接A）的净值/估算口径；参考基准只用于对照，不代表你的支付宝持仓。本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
   </main>
 </body>
 </html>"""
@@ -1233,33 +1093,22 @@ def collect_items(config, days):
 def collect_benchmarks(config, days):
     benchmarks = []
     for benchmark in config.get("benchmarks", []):
-        benchmark_type = (benchmark.get("type") or "index").strip().lower()
-        if benchmark_type == "fund":
-            code = str(benchmark.get("code", "")).strip()
-            if not code:
-                continue
-            rows = fetch_history(code, days=days)
-            benchmarks.append(
-                {
-                    "label": benchmark.get("label") or code,
-                    "color": benchmark.get("color", "#98a2b3"),
-                    "rows": rows,
-                    "use_trend": True,
-                }
-            )
-        else:
-            secid = str(benchmark.get("secid", "")).strip()
-            if not secid:
-                continue
-            data = fetch_index_history(secid, days=days)
-            benchmarks.append(
-                {
-                    "label": benchmark.get("label") or data["label"],
-                    "color": benchmark.get("color", "#98a2b3"),
-                    "rows": data["rows"],
-                    "use_trend": False,
-                }
-            )
+        try:
+            benchmark_type = (benchmark.get("type") or "index").strip().lower()
+            if benchmark_type == "fund":
+                code = str(benchmark.get("code", "")).strip()
+                if not code:
+                    continue
+                rows = fetch_history(code, days=days)
+                benchmarks.append({"label": benchmark.get("label") or code, "color": benchmark.get("color", "#98a2b3"), "rows": rows, "use_trend": True})
+            else:
+                secid = str(benchmark.get("secid", "")).strip()
+                if not secid:
+                    continue
+                data = fetch_index_history(secid, days=days)
+                benchmarks.append({"label": benchmark.get("label") or data["label"], "color": benchmark.get("color", "#98a2b3"), "rows": data["rows"], "use_trend": False})
+        except Exception as exc:
+            print(f"WARN: benchmark skipped {benchmark}: {exc}", file=sys.stderr)
         time.sleep(0.15)
     return benchmarks
 
@@ -1268,16 +1117,11 @@ def send_pushplus(config, title, content):
     token = os.environ.get("PUSHPLUS_TOKEN") or config.get("pushplus_token")
     if not token:
         raise RuntimeError("未配置 PushPlus token")
-    payload = {
-        "token": token,
-        "title": title,
-        "content": content,
-        "template": "html",
-    }
+    payload = {"token": token, "title": title, "content": content, "template": "html"}
     topic = config.get("pushplus_topic")
     if topic:
         payload["topic"] = topic
-    result = http_post_json(PUSHPLUS_URL, payload)
+    result = http_post_json(PUSHPLUS_URL, payload, timeout=35, retries=5)
     try:
         result_data = json.loads(result)
     except json.JSONDecodeError:
@@ -1288,32 +1132,68 @@ def send_pushplus(config, title, content):
     return result
 
 
+def load_state(path):
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def save_state(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--send", action="store_true", help="send report to PushPlus")
     parser.add_argument("--dry-run", action="store_true", help="generate report without sending")
+    parser.add_argument("--once-per-day", action="store_true", help="skip scheduled send if today's Beijing-date report was already sent")
+    parser.add_argument("--force-send", action="store_true", help="ignore once-per-day state, useful for manual test runs")
+    parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE.relative_to(BASE_DIR)), help="state file used by --once-per-day")
     args = parser.parse_args()
 
     config = load_config()
     if not config.get("funds"):
         raise RuntimeError("配置里没有 funds")
 
+    state_path = resolve_path(args.state_file)
+    today = china_now().date().isoformat()
+    state = load_state(state_path) if args.once_per_day else {}
+    if args.send and args.once_per_day and not args.force_send and state.get("last_sent_date") == today:
+        print(f"skip=already_sent date={today} sent_at={state.get('last_sent_at', '')}")
+        return
+
     REPORT_DIR.mkdir(exist_ok=True)
     days = required_history_days(config)
     items = collect_items(config, days)
     benchmarks = collect_benchmarks(config, days)
     report = build_report(items, benchmarks, config)
-    today = dt.date.today().isoformat()
     out_path = REPORT_DIR / f"fund-report-{today}.html"
     out_path.write_text(report, encoding="utf-8")
 
-    title = f"{config.get('title', '美股指数基金定投日报')} {today}"
+    title = f"{config.get('title', '纳斯达克100基金定投日报')} {today}"
     print(f"report={out_path}")
     if args.send and not args.dry_run:
         push_content = build_pushplus_report(items, benchmarks, config)
         print(f"pushplus_content_chars={len(push_content)}")
         result = send_pushplus(config, title, push_content)
         print(result)
+        if args.once_per_day:
+            latest = items[0]["summary"] if items else {}
+            state.update(
+                {
+                    "last_sent_date": today,
+                    "last_sent_at": china_now().isoformat(timespec="seconds"),
+                    "latest_nav_date": latest.get("latest_date"),
+                    "latest_nav": latest.get("latest_nav"),
+                    "fund_codes": [str(fund.get("code")) for fund in config.get("funds", [])],
+                }
+            )
+            save_state(state_path, state)
+            print(f"state={state_path}")
 
 
 if __name__ == "__main__":
