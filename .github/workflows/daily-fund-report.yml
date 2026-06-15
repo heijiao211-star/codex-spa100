@@ -2,20 +2,46 @@ name: Daily fund report
 
 on:
   schedule:
-    # 08:30 Asia/Shanghai. GitHub Actions cron uses UTC.
+    # GitHub Actions cron uses UTC. These are Beijing-time fallbacks:
+    # 08:30, 09:17, 10:43, 12:11, 15:29, 20:53.
     - cron: "30 0 * * *"
+    - cron: "17 1 * * *"
+    - cron: "43 2 * * *"
+    - cron: "11 4 * * *"
+    - cron: "29 7 * * *"
+    - cron: "53 12 * * *"
   workflow_dispatch:
+    inputs:
+      force_send:
+        description: "Ignore today's sent-state and send again"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: write
+
+env:
+  TZ: Asia/Shanghai
+
+concurrency:
+  group: daily-fund-report
+  cancel-in-progress: false
 
 jobs:
   pushplus:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     env:
-      TZ: Asia/Shanghai
       PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -23,7 +49,25 @@ jobs:
           python-version: "3.12"
 
       - name: Send report
-        run: python daily_fund_report.py --send
+        env:
+          FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send == 'true' }}
+        run: |
+          args="--send --once-per-day"
+          if [ "$FORCE_SEND" = "true" ]; then
+            args="$args --force-send"
+          fi
+          python daily_fund_report.py $args
+
+      - name: Persist sent-state
+        if: always()
+        run: |
+          if [ -f .github/fund-report-state.json ] && ! git diff --quiet -- .github/fund-report-state.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/fund-report-state.json
+            git commit -m "chore: update fund report sent state"
+            git push
+          fi
 
       - name: Upload HTML report
         if: always()
