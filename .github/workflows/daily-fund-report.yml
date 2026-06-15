@@ -56,7 +56,7 @@ jobs:
           if [ "$FORCE_SEND" = "true" ]; then
             args="$args --force-send"
           fi
-          python daily_fund_report.py $args
+          python daily_fund_report_runtime.py $args
 
       - name: Persist sent-state
         if: always()
