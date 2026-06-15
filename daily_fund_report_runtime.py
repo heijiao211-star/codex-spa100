@@ -6,6 +6,9 @@ import time
 import daily_fund_report as report
 
 
+ORIGINAL_CHART_LINE_CONFIG = report.chart_line_config
+
+
 # QuickChart receives pure JSON, so JavaScript callback strings are rendered as
 # plain strings and cause the English "is not a function" chart error. Keep the
 # axis numeric and put the percent sign in chart titles / labels instead.
@@ -21,7 +24,7 @@ def fixed_tick_options(y_suffix="", min_value=None, max_value=None):
 
 
 def fixed_chart_line_config(title, series_list, y_suffix="", max_points=90, strong=False, min_value=None, max_value=None):
-    config = report.chart_line_config(title, series_list, y_suffix, max_points, strong, min_value, max_value)
+    config = ORIGINAL_CHART_LINE_CONFIG(title, series_list, y_suffix, max_points, strong, min_value, max_value)
     y_axis = config["options"]["scales"]["yAxes"][0]
     y_axis["ticks"] = fixed_tick_options(y_suffix, min_value, max_value)
     if y_suffix == "%":
