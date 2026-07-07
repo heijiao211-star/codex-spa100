@@ -2,18 +2,14 @@ name: Daily fund report
 
 on:
   schedule:
-    # GitHub Actions cron uses UTC. These are Beijing-time fallbacks:
-    # 08:30, 09:17, 10:43, 12:11, 15:29, 20:53.
-    - cron: "30 0 * * *"
-    - cron: "17 1 * * *"
-    - cron: "43 2 * * *"
-    - cron: "11 4 * * *"
-    - cron: "29 7 * * *"
-    - cron: "53 12 * * *"
+    # GitHub Actions cron uses UTC. Beijing time is UTC+8.
+    # 11:00 CST -> 03:00 UTC, 16:00 CST -> 08:00 UTC.
+    - cron: "0 3 * * *"
+    - cron: "0 8 * * *"
   workflow_dispatch:
     inputs:
       force_send:
-        description: "Ignore today's sent-state and send again"
+        description: "Ignore sent-state and force send again"
         required: false
         default: "false"
         type: choice
@@ -52,7 +48,7 @@ jobs:
         env:
           FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send == 'true' }}
         run: |
-          args="--send --once-per-day"
+          args="--send --twice-per-day"
           if [ "$FORCE_SEND" = "true" ]; then
             args="$args --force-send"
           fi

@@ -1146,13 +1146,29 @@ def save_state(path, state):
     path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def current_beijing_slot():
+    """Return the scheduled report slot for the current Beijing time.
+
+    Morning slot: 05:00-12:59 (covers the 11:00 CST run).
+    Afternoon slot: 13:00-20:59 (covers the 16:00 CST run).
+    Outside these windows the function returns None; manual runs outside
+    scheduled hours will not be blocked by the twice-per-day guard.
+    """
+    hour = china_now().hour
+    if 5 <= hour < 13:
+        return "morning"
+    if 13 <= hour < 21:
+        return "afternoon"
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--send", action="store_true", help="send report to PushPlus")
     parser.add_argument("--dry-run", action="store_true", help="generate report without sending")
-    parser.add_argument("--once-per-day", action="store_true", help="skip scheduled send if today's Beijing-date report was already sent")
-    parser.add_argument("--force-send", action="store_true", help="ignore once-per-day state, useful for manual test runs")
-    parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE.relative_to(BASE_DIR)), help="state file used by --once-per-day")
+    parser.add_argument("--twice-per-day", action="store_true", help="skip scheduled send if the current morning/afternoon slot was already sent")
+    parser.add_argument("--force-send", action="store_true", help="ignore twice-per-day state, useful for manual test runs")
+    parser.add_argument("--state-file", default=str(DEFAULT_STATE_FILE.relative_to(BASE_DIR)), help="state file used by --twice-per-day")
     args = parser.parse_args()
 
     config = load_config()
@@ -1161,10 +1177,13 @@ def main():
 
     state_path = resolve_path(args.state_file)
     today = china_now().date().isoformat()
-    state = load_state(state_path) if args.once_per_day else {}
-    if args.send and args.once_per_day and not args.force_send and state.get("last_sent_date") == today:
-        print(f"skip=already_sent date={today} sent_at={state.get('last_sent_at', '')}")
-        return
+    slot = current_beijing_slot()
+    state = load_state(state_path) if args.twice_per_day else {}
+    if args.send and args.twice_per_day and not args.force_send and slot:
+        slot_state = state.get(slot, {})
+        if slot_state.get("date") == today:
+            print(f"skip=already_sent slot={slot} date={today} sent_at={slot_state.get('sent_at', '')}")
+            return
 
     REPORT_DIR.mkdir(exist_ok=True)
     days = required_history_days(config)
@@ -1181,19 +1200,25 @@ def main():
         print(f"pushplus_content_chars={len(push_content)}")
         result = send_pushplus(config, title, push_content)
         print(result)
-        if args.once_per_day:
+        if args.twice_per_day:
             latest = items[0]["summary"] if items else {}
+            slot_state = {
+                "date": today,
+                "sent_at": china_now().isoformat(timespec="seconds"),
+                "latest_nav_date": latest.get("latest_date"),
+                "latest_nav": latest.get("latest_nav"),
+            }
+            state[slot] = slot_state
+            # Keep a top-level last-sent record for human readability.
             state.update(
                 {
                     "last_sent_date": today,
-                    "last_sent_at": china_now().isoformat(timespec="seconds"),
-                    "latest_nav_date": latest.get("latest_date"),
-                    "latest_nav": latest.get("latest_nav"),
+                    "last_sent_at": slot_state["sent_at"],
                     "fund_codes": [str(fund.get("code")) for fund in config.get("funds", [])],
                 }
             )
             save_state(state_path, state)
-            print(f"state={state_path}")
+            print(f"state={state_path} slot={slot}")
 
 
 if __name__ == "__main__":
