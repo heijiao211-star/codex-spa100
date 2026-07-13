@@ -1,6 +1,12 @@
 {
   "title": "纳斯达克100基金定投日报",
   "history_days": 1200,
+  "ai_briefing": {
+    "enabled": true,
+    "model": "deepseek-v4-flash",
+    "max_news": 5,
+    "timeout_seconds": 28
+  },
   "pushplus_token": "把你的 PushPlus token 放到 config.local.json，或设置环境变量 PUSHPLUS_TOKEN",
   "funds": [
     {
