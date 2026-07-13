@@ -1,6 +1,12 @@
 {
   "title": "纳斯达克100基金定投日报",
   "history_days": 1200,
+  "ai_briefing": {
+    "enabled": true,
+    "model": "deepseek-v4-flash",
+    "max_news": 5,
+    "timeout_seconds": 28
+  },
   "source_note": "主数据固定使用支付宝可购买的基金代码 270042（广发纳斯达克100ETF联接A）净值口径；基准图只作参考，不把美股纳斯达克指数当作你的持仓数据。",
   "funds": [
     {

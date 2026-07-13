@@ -13,6 +13,7 @@ import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from ai_market_briefing import build_market_briefing, render_market_briefing_html
 
 BASE_DIR = Path(__file__).resolve().parent
 REPORT_DIR = BASE_DIR / "reports"
@@ -743,28 +744,7 @@ def summarize(rows, estimate):
         "ma20": ma20,
         "ma60": ma60,
     }
-    summary["signal"] = make_signal(summary, latest["nav"])
     return summary
-
-
-def make_signal(summary, latest_nav):
-    growth = summary.get("daily_change")
-    r7 = summary.get("return_7d")
-    r30 = summary.get("return_30d")
-    ma20 = summary.get("ma20")
-    ma60 = summary.get("ma60")
-
-    if growth is not None and growth <= -2.0:
-        return ("可小额加仓", "单日回撤较深，若原计划定投不变，可考虑把加仓拆成 2-3 笔。")
-    if r7 is not None and r7 <= -4.0:
-        return ("偏左侧机会", "近七个净值日回撤明显，适合用定投资金慢慢承接，避免一次性打满。")
-    if r30 is not None and r30 >= 8.0 and growth is not None and growth > 0:
-        return ("控制追高", "短期涨幅偏快，新增资金宜按原定投节奏，不建议情绪化加码。")
-    if ma20 and ma60 and latest_nav > ma20 > ma60:
-        return ("趋势偏强", "中短期均线向上，新增资金保持纪律。")
-    if ma20 and latest_nav < ma20:
-        return ("等待确认", "净值低于 20 日均线，短线偏弱，适合分批而不是单笔重仓。")
-    return ("保持定投", "没有出现极端涨跌，按计划投入比择时更重要。")
 
 
 def metric_cell(label, value, color=None):
@@ -804,7 +784,6 @@ def build_card(item, benchmarks, index):
     rows = item["rows"]
     summary = item["summary"]
     estimate = item["estimate"] or {}
-    signal, advice = summary["signal"]
     name = fund.get("label") or estimate.get("name") or fund["code"]
     color = fund.get("color", "#2563eb")
     source_note = (
@@ -823,7 +802,6 @@ def build_card(item, benchmarks, index):
         metric_cell("近1年回撤", fmt_pct(summary["drawdown_1y"], signed=False)),
         metric_cell("近3年最大回撤", fmt_pct(summary["drawdown_3y"], signed=False)),
         metric_cell("年化波动率", fmt_pct(summary["vol_3y"], signed=False)),
-        metric_cell("操作提示", html.escape(signal)),
     ]
 
     seven_rows = rows[-7:]
@@ -843,7 +821,6 @@ def build_card(item, benchmarks, index):
   </div>
   {change_panel(summary)}
   <div class="metrics">{''.join(metrics)}</div>
-  <div class="advice">{html.escape(advice)}</div>
   <h3>近7个净值日趋势</h3>
   {svg_line(seven_rows, height=200, color=color, fill_id=f"fill7{index}")}
   <h3>近7个净值日涨跌</h3>
@@ -861,31 +838,8 @@ def build_card(item, benchmarks, index):
 </section>"""
 
 
-def market_temperature(items):
-    scores = []
-    for item in items:
-        summary = item["summary"]
-        r30 = summary.get("return_30d") or 0
-        r7 = summary.get("return_7d") or 0
-        dd = abs(summary.get("drawdown_1y") or 0)
-        score = 50 + r30 * 2 + r7 * 1.2 - max(0, dd - 10) * 0.7
-        scores.append(max(0, min(100, score)))
-    if not scores:
-        return 50
-    return round(sum(scores) / len(scores))
-
-
-def temperature_text(temp, long=False):
-    if temp >= 68:
-        return "偏热，新增资金宜克制追涨" if long else "偏热，控制追涨"
-    if temp <= 38:
-        return "偏冷，定投资金可更从容分批" if long else "偏冷，分批承接"
-    return "中性，按计划执行更优" if long else "中性，按计划执行"
-
-
-def build_report(items, benchmarks, config):
+def build_report(items, benchmarks, config, market_briefing):
     now = china_now().strftime("%Y-%m-%d %H:%M")
-    temp = market_temperature(items)
     title = config.get("title", "纳斯达克100基金定投日报")
     cards = "\n".join(build_card(item, benchmarks, idx) for idx, item in enumerate(items))
     data_rows = []
@@ -902,8 +856,7 @@ def build_report(items, benchmarks, config):
             f"<td>{fmt_pct(summary['return_30d'])}</td>"
             f"<td>{fmt_pct(summary['return_1y'])}</td>"
             f"<td>{fmt_pct(summary['return_3y'])}</td>"
-            f"<td>{fmt_pct(summary['drawdown_3y'], signed=False)}</td>"
-            f"<td>{html.escape(summary['signal'][0])}</td></tr>"
+            f"<td>{fmt_pct(summary['drawdown_3y'], signed=False)}</td></tr>"
         )
 
     return f"""<!doctype html>
@@ -918,7 +871,17 @@ def build_report(items, benchmarks, config):
   .hero {{ padding: 26px 24px; border-radius: 8px; background: linear-gradient(135deg, #111827, #243b53 58%, #0f766e); color: #fff; }}
   .hero h1 {{ margin: 0 0 8px; font-size: 28px; }}
   .hero p {{ margin: 0; color: #d9e8f2; line-height: 1.65; }}
-  .temp {{ display: inline-block; margin-top: 16px; padding: 9px 12px; border: 1px solid rgba(255,255,255,.24); border-radius: 6px; background: rgba(255,255,255,.12); font-weight: 700; }}
+  .market-briefing {{ margin-top: 16px; padding: 18px; border-radius: 8px; background: #fff; color: #1d2939; }}
+  .market-briefing h2 {{ margin: 4px 0 8px; font-size: 20px; }}
+  .market-briefing p {{ color: #475467; }}
+  .briefing-kicker {{ color: #0f766e; font-weight: 700; font-size: 12px; }}
+  .briefing-tailwinds, .briefing-risks {{ margin-top: 12px; padding: 10px 12px; border-radius: 6px; }}
+  .briefing-tailwinds {{ background: #ecfdf3; }}
+  .briefing-risks {{ background: #fffaeb; }}
+  .market-briefing ul {{ margin: 6px 0 0; padding-left: 18px; color: #475467; line-height: 1.65; }}
+  .market-briefing small {{ color: #667085; }}
+  .briefing-takeaway {{ display: flex; gap: 10px; margin-top: 12px; padding: 11px 12px; border-left: 4px solid #0f766e; background: #f0fdf4; border-radius: 6px; line-height: 1.6; }}
+  .briefing-disclaimer, .briefing-fallback {{ display: block; margin-top: 10px; }}
   .fund-card {{ margin-top: 18px; padding: 22px; border: 1px solid #e4e7ec; border-radius: 8px; background: #fff; box-shadow: 0 12px 30px rgba(16, 24, 40, .06); }}
   .fund-head {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }}
   .fund-kicker {{ color: #667085; font-size: 13px; font-weight: 700; }}
@@ -933,7 +896,6 @@ def build_report(items, benchmarks, config):
   .metrics div {{ padding: 12px; background: #f8fafc; border: 1px solid #edf2f7; border-radius: 8px; }}
   .metrics span {{ display: block; color: #667085; font-size: 12px; margin-bottom: 5px; }}
   .metrics strong {{ font-size: 16px; }}
-  .advice {{ margin-top: 12px; padding: 12px 14px; border-left: 4px solid #0f766e; background: #ecfdf3; color: #184e44; line-height: 1.7; border-radius: 6px; }}
   .chart {{ width: 100%; height: auto; display: block; overflow: visible; }}
   .grid line {{ stroke: #e5e7eb; stroke-width: 1; }}
   .axis-label text, .date-label, .bar-value {{ fill: #667085; font-size: 12px; font-weight: 700; }}
@@ -952,11 +914,11 @@ def build_report(items, benchmarks, config):
   <section class="hero">
     <h1>{html.escape(title)}</h1>
     <p>生成时间：{now}。{html.escape(config.get('source_note', '主数据固定使用基金代码 270042。'))}</p>
-    <div class="temp">市场温度 {temp}/100 · {temperature_text(temp, long=True)}</div>
   </section>
+  {render_market_briefing_html(market_briefing)}
   {cards}
   <table>
-    <thead><tr><th>基金</th><th>净值日</th><th>最新净值</th><th>当日涨跌</th><th>近7日</th><th>近1月</th><th>近1年</th><th>近3年</th><th>最大回撤</th><th>提示</th></tr></thead>
+    <thead><tr><th>基金</th><th>净值日</th><th>最新净值</th><th>当日涨跌</th><th>近7日</th><th>近1月</th><th>近1年</th><th>近3年</th><th>最大回撤</th></tr></thead>
     <tbody>{''.join(data_rows)}</tbody>
   </table>
   <p class="note">说明：红色代表上涨，绿色代表下跌。主数据固定为支付宝可购买基金代码 270042（广发纳斯达克100ETF联接A）的净值/估算口径；参考基准仅用于趋势对照，不代表你的支付宝持仓数据。本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
@@ -965,10 +927,9 @@ def build_report(items, benchmarks, config):
 </html>"""
 
 
-def build_pushplus_report(items, benchmarks, config):
+def build_pushplus_report(items, benchmarks, config, market_briefing):
     now = china_now().strftime("%Y-%m-%d %H:%M")
     title = config.get("title", "纳斯达克100基金定投日报")
-    temp = market_temperature(items)
     rows = []
     cards = []
     for item in items:
@@ -976,7 +937,6 @@ def build_pushplus_report(items, benchmarks, config):
         summary = item["summary"]
         estimate = item["estimate"] or {}
         name = fund.get("label") or estimate.get("name") or fund["code"]
-        signal, advice = summary["signal"]
         daily = fmt_pct(summary.get("daily_change"))
         daily_color = color_for(summary.get("daily_change"))
         r7 = fmt_pct(summary["return_7d"])
@@ -1020,9 +980,7 @@ def build_pushplus_report(items, benchmarks, config):
     <div><span>近3年</span><b style="color:{color_for(summary['return_3y'])};">{three_year}</b></div>
     <div><span>最大回撤</span><b>{drawdown}</b></div>
     <div><span>年化波动</span><b>{vol}</b></div>
-    <div><span>操作提示</span><b>{html.escape(signal)}</b></div>
   </div>
-  <div class="advice"><b>{html.escape(signal)}</b><p>{html.escape(advice)}</p></div>
   {pushplus_chart_images(item, benchmarks)}
 </section>"""
         )
@@ -1037,7 +995,17 @@ def build_pushplus_report(items, benchmarks, config):
   .hero {{ padding: 20px 18px; border-radius: 8px; background: #111827; color: #fff; }}
   h1 {{ font-size: 22px; line-height: 1.25; margin: 0 0 8px; }}
   .hero p {{ margin: 0; color: #d0d5dd; font-size: 13px; line-height: 1.7; }}
-  .temperature {{ display: inline-block; margin-top: 12px; padding: 7px 10px; border-radius: 6px; background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.18); color: #fff; font-size: 13px; font-weight: 700; }}
+  .market-briefing {{ margin-top: 14px; padding: 15px 14px; border-radius: 8px; background: #fff; color: #1d2939; }}
+  .market-briefing h2 {{ font-size: 18px; margin: 4px 0 7px; }}
+  .market-briefing p {{ color: #475467; font-size: 13px; line-height: 1.7; }}
+  .briefing-kicker {{ color: #0f766e; font-size: 12px; font-weight: 700; }}
+  .briefing-tailwinds, .briefing-risks {{ margin-top: 10px; padding: 9px 10px; border-radius: 6px; font-size: 13px; }}
+  .briefing-tailwinds {{ background: #ecfdf3; }}
+  .briefing-risks {{ background: #fffaeb; }}
+  .market-briefing ul {{ margin: 5px 0 0; padding-left: 17px; color: #475467; line-height: 1.6; }}
+  .briefing-takeaway {{ margin-top: 10px; padding: 10px; border-left: 4px solid #0f766e; background: #f0fdf4; border-radius: 6px; line-height: 1.65; font-size: 13px; }}
+  .briefing-takeaway b {{ display: block; margin-bottom: 3px; }}
+  .briefing-disclaimer, .briefing-fallback {{ display: block; margin-top: 8px; color: #667085; font-size: 11px; }}
   .fund-card {{ margin-top: 14px; padding: 16px 14px; border: 1px solid #e4e7ec; border-radius: 8px; background: #fff; }}
   .fund-top {{ display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }}
   .code {{ color: #667085; font-size: 12px; font-weight: 700; }}
@@ -1051,8 +1019,6 @@ def build_pushplus_report(items, benchmarks, config):
   .metric-grid div {{ padding: 10px; border-radius: 8px; background: #f8fafc; border: 1px solid #edf2f7; }}
   .metric-grid span {{ display: block; color: #667085; font-size: 12px; margin-bottom: 4px; }}
   .metric-grid b {{ font-size: 16px; }}
-  .advice {{ margin-top: 12px; padding: 11px 12px; border-left: 4px solid #2563eb; background: #eff6ff; border-radius: 7px; color: #1d2939; line-height: 1.65; }}
-  .advice p {{ margin: 4px 0 0; }}
   .chart-card {{ margin-top: 12px; padding: 8px; border-radius: 8px; border: 1px solid #e4e7ec; background: #fff; }}
   table {{ width: 100%; border-collapse: collapse; margin-top: 14px; background: #fff; }}
   th, td {{ border-bottom: 1px solid #eaecf0; padding: 8px 6px; font-size: 12px; text-align: left; }}
@@ -1065,8 +1031,8 @@ def build_pushplus_report(items, benchmarks, config):
     <section class="hero">
       <h1>{html.escape(title)}</h1>
       <p>生成时间：{now}。{html.escape(config.get('source_note', '主数据固定使用基金代码 270042。'))}</p>
-      <div class="temperature">市场温度 {temp}/100 · {temperature_text(temp)}</div>
     </section>
+    {render_market_briefing_html(market_briefing, compact=True)}
     {''.join(cards)}
     <table>
       <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近7日</th><th>近1年</th><th>最大回撤</th></tr></thead>
@@ -1189,14 +1155,15 @@ def main():
     days = required_history_days(config)
     items = collect_items(config, days)
     benchmarks = collect_benchmarks(config, days)
-    report = build_report(items, benchmarks, config)
+    market_briefing = build_market_briefing(items, config)
+    report = build_report(items, benchmarks, config, market_briefing)
     out_path = REPORT_DIR / f"fund-report-{today}.html"
     out_path.write_text(report, encoding="utf-8")
 
     title = f"{config.get('title', '纳斯达克100基金定投日报')} {today}"
     print(f"report={out_path}")
     if args.send and not args.dry_run:
-        push_content = build_pushplus_report(items, benchmarks, config)
+        push_content = build_pushplus_report(items, benchmarks, config, market_briefing)
         print(f"pushplus_content_chars={len(push_content)}")
         result = send_pushplus(config, title, push_content)
         print(result)
