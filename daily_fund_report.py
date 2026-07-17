@@ -194,14 +194,15 @@ def fetch_history_legacy(code, days=DEFAULT_HISTORY_DAYS):
 
 
 def parse_fund_history_api(text):
-    """Parse Eastmoney's JSON historical-NAV API response."""
+    """Parse the Eastmoney JSON historical-NAV response."""
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
         raise RuntimeError("fund history API returned invalid JSON") from exc
 
     if payload.get("ErrCode") not in (None, 0):
-        raise RuntimeError(f"fund history API error: {payload.get('ErrMsg') or payload.get('ErrCode')}")
+        message = payload.get("ErrMsg") or payload.get("ErrCode")
+        raise RuntimeError(f"fund history API error: {message}")
 
     records = (payload.get("Data") or {}).get("LSJZList") or []
     rows = []
@@ -266,8 +267,7 @@ def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
         except Exception as exc:
             errors.append(f"{name}: {exc}")
             print(f"WARN: fund history source {name} failed for {code}: {exc}", file=sys.stderr)
-    raise RuntimeError(f"unable to fetch fund history for {code}: {'; '.join(errors)}")
-
+    raise RuntimeError("unable to fetch fund history for " + str(code) + ": " + "; ".join(errors))
 
 def fetch_estimate(code):
     try:
@@ -554,7 +554,350 @@ def svg_multi_line(series_list, width=760, height=270, value_kind="number", max_
     def xy(point):
         day = dt.date.fromisoformat(point["date"]).toordinal()
         x = pad_l + (day - d_min) / (d_max - d_min) * plot_w
-        y = pad_t + (v_max - point["value"])…3895 tokens truncated…ics">{''.join(metrics)}</div>
+        y = pad_t + (v_max - point["value"]) / (v_max - v_min) * plot_h
+        return x, y
+
+    grid = []
+    labels = []
+    for step in range(5):
+        y = pad_t + plot_h * step / 4
+        value = v_max - (v_max - v_min) * step / 4
+        grid.append(f"<line x1='{pad_l}' y1='{y:.1f}' x2='{width - pad_r}' y2='{y:.1f}' />")
+        labels.append(f"<text x='{pad_l - 8}' y='{y + 4:.1f}' text-anchor='end'>{format_axis_value(value, value_kind)}</text>")
+
+    if v_min < 0 < v_max:
+        zero_y = pad_t + (v_max / (v_max - v_min)) * plot_h
+        grid.append(f"<line x1='{pad_l}' y1='{zero_y:.1f}' x2='{width - pad_r}' y2='{zero_y:.1f}' class='zero-line' />")
+
+    polylines = []
+    legends = []
+    stroke_width = "4.4" if strong else "3.4"
+    radius = "5" if strong else "4"
+    for idx, series in enumerate(prepared):
+        points = [xy(point) for point in series["points"]]
+        poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+        polylines.append(
+            f"<polyline points='{poly}' fill='none' stroke='{series['color']}' stroke-width='{stroke_width}' "
+            f"stroke-linecap='round' stroke-linejoin='round'/>"
+            f"<circle cx='{points[-1][0]:.1f}' cy='{points[-1][1]:.1f}' r='{radius}' fill='{series['color']}'/>"
+        )
+        legend_x = pad_l + idx * 190
+        legends.append(
+            f"<rect x='{legend_x}' y='5' width='12' height='12' rx='3' fill='{series['color']}'/>"
+            f"<text x='{legend_x + 18}' y='15' fill='#475467' font-size='12'>{html.escape(series['label'])}</text>"
+        )
+
+    first_date = dt.date.fromordinal(d_min).isoformat()
+    last_date = dt.date.fromordinal(d_max).isoformat()
+    return f"""
+<svg viewBox="0 0 {width} {height}" class="chart" role="img">
+  <g class="legend">{''.join(legends)}</g>
+  <g class="grid">{''.join(grid)}</g>
+  <g class="axis-label">{''.join(labels)}</g>
+  {''.join(polylines)}
+  <text x="{pad_l}" y="{height - 11}" class="date-label">{first_date}</text>
+  <text x="{width - pad_r}" y="{height - 11}" text-anchor="end" class="date-label">{last_date}</text>
+</svg>"""
+
+
+def rows_to_series(rows, label, color, days=None, normalize=False, use_trend=True):
+    selected = rows_since_calendar_days(rows, days) if days else rows
+    points = []
+    base = None
+    for row in selected:
+        value = trend_value(row) if use_trend else row["nav"]
+        if base is None:
+            base = value
+        if normalize and base not in (None, 0):
+            value = (value / base - 1) * 100
+        points.append({"date": row["date"], "value": value})
+    return {"label": label, "color": color, "points": points}
+
+
+def points_to_series(points, label, color):
+    return {"label": label, "color": color, "points": points}
+
+
+def sample_chart_points(points, max_points):
+    sampled = sample_points(points, max_points)
+    return [point for point in sampled if point.get("value") is not None]
+
+
+def quickchart_tick_options(y_suffix="", min_value=None, max_value=None):
+    ticks = {"fontColor": "#667085", "fontSize": 11, "padding": 6}
+    if min_value is not None:
+        ticks["min"] = min_value
+    if max_value is not None:
+        ticks["max"] = max_value
+    if y_suffix == "%":
+        ticks["callback"] = "function(value) { return value + '%'; }"
+    return ticks
+
+
+def chart_line_config(title, series_list, y_suffix="", max_points=90, strong=False, min_value=None, max_value=None):
+    labels = []
+    datasets = []
+    for series in series_list:
+        points = sample_chart_points(series.get("points", []), max_points)
+        if not points:
+            continue
+        if not labels:
+            labels = [point["date"] for point in points]
+        values = align_series_to_labels(points, labels)
+        datasets.append(
+            {
+                "label": series["label"],
+                "data": values,
+                "borderColor": series["color"],
+                "backgroundColor": series["color"],
+                "borderWidth": 3.8 if strong else 2.8,
+                "pointRadius": 0,
+                "fill": False,
+                "tension": 0.15,
+                "lineTension": 0.15,
+            }
+        )
+    return {
+        "type": "line",
+        "data": {"labels": labels, "datasets": datasets},
+        "options": {
+            "responsive": True,
+            "maintainAspectRatio": False,
+            "layout": {"padding": {"left": 10, "right": 14, "top": 12, "bottom": 8}},
+            "title": {"display": True, "text": title, "fontSize": 18, "fontColor": "#111827", "fontStyle": "600", "padding": 16},
+            "legend": {"display": len(datasets) > 1, "position": "bottom", "labels": {"boxWidth": 10, "fontColor": "#475467", "padding": 14}},
+            "scales": {
+                "xAxes": [{"gridLines": {"display": False, "drawBorder": False}, "ticks": {"maxTicksLimit": 6, "fontColor": "#667085", "fontSize": 10}}],
+                "yAxes": [{"gridLines": {"color": "#eef2f6", "drawBorder": False}, "ticks": quickchart_tick_options(y_suffix, min_value, max_value)}],
+            },
+        },
+    }
+
+
+def chart_bar_config(title, rows):
+    rows = rows[-7:]
+    vals = [row["growth"] if row.get("growth") is not None else 0 for row in rows]
+    limit = max(0.25, max(abs(v) for v in vals) * 1.35) if vals else 1
+    return {
+        "type": "bar",
+        "data": {
+            "labels": [row["date"][5:] for row in rows],
+            "datasets": [
+                {
+                    "label": "日涨跌",
+                    "data": vals,
+                    "backgroundColor": ["#d92d20" if val >= 0 else "#039855" for val in vals],
+                    "barPercentage": 0.72,
+                    "categoryPercentage": 0.72,
+                }
+            ],
+        },
+        "options": {
+            "responsive": True,
+            "maintainAspectRatio": False,
+            "layout": {"padding": {"left": 10, "right": 14, "top": 12, "bottom": 8}},
+            "title": {"display": True, "text": title, "fontSize": 18, "fontColor": "#111827", "fontStyle": "600", "padding": 16},
+            "legend": {"display": False},
+            "scales": {
+                "xAxes": [{"gridLines": {"display": False, "drawBorder": False}, "ticks": {"fontColor": "#667085", "fontSize": 11}}],
+                "yAxes": [{"gridLines": {"color": "#eef2f6", "drawBorder": False, "zeroLineColor": "#98a2b3"}, "ticks": quickchart_tick_options("%", -limit, limit)}],
+            },
+        },
+    }
+
+
+def align_series_to_labels(points, labels):
+    by_date = {point["date"]: point["value"] for point in points}
+    ordered = sorted(points, key=lambda point: point["date"])
+    values = []
+    cursor = 0
+    last_value = None
+    for label in labels:
+        if label in by_date:
+            last_value = by_date[label]
+            values.append(last_value)
+            continue
+        while cursor < len(ordered) and ordered[cursor]["date"] <= label:
+            last_value = ordered[cursor]["value"]
+            cursor += 1
+        values.append(last_value)
+    return values
+
+
+def image_html(url, alt):
+    return (
+        f"<div class='chart-card'><img src='{html.escape(url)}' alt='{html.escape(alt)}' "
+        "style='width:100%;max-width:760px;display:block;border:0;border-radius:8px;'/></div>"
+    )
+
+
+def pushplus_chart_images(item, benchmarks):
+    fund = item["fund"]
+    rows = item["rows"]
+    estimate = item["estimate"] or {}
+    name = fund.get("label") or estimate.get("name") or fund["code"]
+    color = fund.get("color", "#2563eb")
+    seven_rows = rows[-7:]
+    one_month_rows = rows_since_calendar_days(rows, 30)
+    one_year_rows = rows_since_calendar_days(rows, 365)
+    three_year_rows = rows_since_calendar_days(rows, 365 * 3)
+    drawdown_points = build_drawdown_points(three_year_rows)
+    min_drawdown = min((point["value"] for point in drawdown_points), default=-1)
+
+    chart_specs = [
+        (f"{name} 近7个净值日趋势", chart_line_config(f"{name} 近7个净值日趋势", [rows_to_series(seven_rows, "净值", color, use_trend=True)], max_points=7, strong=True)),
+        (f"{name} 近7个净值日涨跌", chart_bar_config(f"{name} 近7个净值日涨跌", rows)),
+        (f"{name} 近1个月净值趋势", chart_line_config(f"{name} 近1个月净值趋势", [rows_to_series(one_month_rows, "净值", color, use_trend=True)], max_points=42, strong=True)),
+        (f"{name} 近1年净值趋势", chart_line_config(f"{name} 近1年净值趋势", [rows_to_series(one_year_rows, "净值", color, use_trend=True)], max_points=90, strong=True)),
+        (f"{name} 近3年净值趋势", chart_line_config(f"{name} 近3年净值趋势", [rows_to_series(three_year_rows, "净值", color, use_trend=True)], max_points=110, strong=True)),
+        (
+            f"{name} 回撤曲线",
+            chart_line_config(
+                f"{name} 回撤曲线",
+                [points_to_series(drawdown_points, "回撤", "#b42318")],
+                y_suffix="%",
+                max_points=110,
+                strong=True,
+                min_value=math.floor(min_drawdown),
+                max_value=0,
+            ),
+        ),
+    ]
+
+    compare_series = [rows_to_series(three_year_rows, name, color, normalize=True, use_trend=True)]
+    for benchmark in benchmarks:
+        compare_series.append(
+            rows_to_series(
+                benchmark["rows"],
+                benchmark["label"],
+                benchmark["color"],
+                days=365 * 3,
+                normalize=True,
+                use_trend=benchmark.get("use_trend", False),
+            )
+        )
+    if len(compare_series) > 1:
+        chart_specs.append((f"{name} vs 参考基准", chart_line_config(f"{name} vs 参考基准", compare_series, y_suffix="%", max_points=110)))
+
+    images = []
+    for alt, config in chart_specs:
+        try:
+            images.append(image_html(quickchart_url(config), alt))
+            time.sleep(0.12)
+        except Exception as exc:
+            print(f"WARN: chart failed {alt}: {exc}", file=sys.stderr)
+            images.append(f"<p class='note'>图表生成失败：{html.escape(alt)}。文字数据仍已正常生成。</p>")
+    return "".join(images)
+
+
+def summarize(rows, estimate):
+    latest = rows[-1]
+    trend_values = [trend_value(x) for x in rows]
+    latest_growth = latest.get("growth")
+    estimate_growth = estimate.get("estimate_growth") if estimate else None
+    seven_rows = rows[-7:]
+    one_year_rows = rows_since_calendar_days(rows, 365)
+    thirty_day_rows = rows_since_calendar_days(rows, 30)
+    three_year_rows = rows_since_calendar_days(rows, 365 * 3)
+    ma20 = moving_average(trend_values, 20)
+    ma60 = moving_average(trend_values, 60)
+    summary = {
+        "latest_date": latest["date"],
+        "latest_nav": latest["nav"],
+        "latest_trend_nav": trend_value(latest),
+        "latest_growth": latest_growth,
+        "daily_change": estimate_growth if estimate_growth is not None else latest_growth,
+        "daily_change_label": "估算涨跌" if estimate_growth is not None else "净值日涨跌",
+        "estimate_growth": estimate_growth,
+        "estimate_time": estimate.get("estimate_time", "") if estimate else "",
+        "return_7d": pct_change(trend_value(seven_rows[0]), trend_value(latest)) if len(seven_rows) > 1 else None,
+        "return_30d": pct_change(trend_value(thirty_day_rows[0]), trend_value(latest)) if len(thirty_day_rows) > 1 else None,
+        "return_1y": pct_change(trend_value(one_year_rows[0]), trend_value(latest)) if len(one_year_rows) > 1 else None,
+        "return_3y": pct_change(trend_value(three_year_rows[0]), trend_value(latest)) if len(three_year_rows) > 1 else None,
+        "drawdown_1y": max_drawdown([trend_value(x) for x in one_year_rows]),
+        "drawdown_3y": max_drawdown([trend_value(x) for x in three_year_rows]),
+        "vol_1y": annualized_volatility(one_year_rows),
+        "vol_3y": annualized_volatility(three_year_rows),
+        "ma20": ma20,
+        "ma60": ma60,
+    }
+    return summary
+
+
+def metric_cell(label, value, color=None):
+    style = f" style='color:{color}'" if color else ""
+    return f"<div><span>{html.escape(label)}</span><strong{style}>{value}</strong></div>"
+
+
+def change_panel(summary):
+    value = summary.get("daily_change")
+    color = color_for(value)
+    label = summary.get("daily_change_label") or "涨跌"
+    source = summary.get("estimate_time") if summary.get("estimate_growth") is not None else summary.get("latest_date")
+    return f"""
+  <div class="change-panel" style="border-color:{color}55;background:{color}10;">
+    <div>
+      <span>{html.escape(label)}</span>
+      <b style="color:{color};">{direction_text(value)}</b>
+      <small>{html.escape(source or '最新可得数据')}</small>
+    </div>
+    <strong style="color:{color};">{fmt_pct(value)}</strong>
+  </div>"""
+
+
+def build_compare_series(item, benchmarks, days=365 * 3):
+    fund = item["fund"]
+    rows = item["rows"]
+    estimate = item["estimate"] or {}
+    name = fund.get("label") or estimate.get("name") or fund["code"]
+    series = [rows_to_series(rows_since_calendar_days(rows, days), name, fund.get("color", "#2563eb"), normalize=True, use_trend=True)]
+    for benchmark in benchmarks:
+        series.append(rows_to_series(benchmark["rows"], benchmark["label"], benchmark["color"], days=days, normalize=True, use_trend=benchmark.get("use_trend", False)))
+    return series
+
+
+def build_card(item, benchmarks, index):
+    fund = item["fund"]
+    rows = item["rows"]
+    summary = item["summary"]
+    estimate = item["estimate"] or {}
+    name = fund.get("label") or estimate.get("name") or fund["code"]
+    color = fund.get("color", "#2563eb")
+    source_note = (
+        f"估算 {fmt_pct(summary['estimate_growth'])} · {summary['estimate_time']}"
+        if summary.get("estimate_growth") is not None
+        else f"最新净值日涨跌 {fmt_pct(summary['latest_growth'])}"
+    )
+
+    metrics = [
+        metric_cell("最新净值", fmt_num(summary["latest_nav"])),
+        metric_cell("净值日期", summary["latest_date"]),
+        metric_cell("近7净值日", fmt_pct(summary["return_7d"]), color_for(summary["return_7d"])),
+        metric_cell("近1个月", fmt_pct(summary["return_30d"]), color_for(summary["return_30d"])),
+        metric_cell("近1年", fmt_pct(summary["return_1y"]), color_for(summary["return_1y"])),
+        metric_cell("近3年", fmt_pct(summary["return_3y"]), color_for(summary["return_3y"])),
+        metric_cell("近1年回撤", fmt_pct(summary["drawdown_1y"], signed=False)),
+        metric_cell("近3年最大回撤", fmt_pct(summary["drawdown_3y"], signed=False)),
+        metric_cell("年化波动率", fmt_pct(summary["vol_3y"], signed=False)),
+    ]
+
+    seven_rows = rows[-7:]
+    one_month_rows = rows_since_calendar_days(rows, 30)
+    one_year_rows = rows_since_calendar_days(rows, 365)
+    three_year_rows = rows_since_calendar_days(rows, 365 * 3)
+    compare_series = build_compare_series(item, benchmarks)
+
+    return f"""
+<section class="fund-card">
+  <div class="fund-head">
+    <div>
+      <div class="fund-kicker">{html.escape(fund['code'])} · 支付宝基金口径</div>
+      <h2>{html.escape(name)}</h2>
+      <p>{html.escape(source_note)}</p>
+    </div>
+  </div>
+  {change_panel(summary)}
+  <div class="metrics">{''.join(metrics)}</div>
   <h3>近7个净值日趋势</h3>
   {svg_line(seven_rows, height=200, color=color, fill_id=f"fill7{index}")}
   <h3>近7个净值日涨跌</h3>
@@ -928,4 +1271,3 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise
-
