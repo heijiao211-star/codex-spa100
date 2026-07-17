@@ -3,10 +3,10 @@ name: Daily fund report
 on:
   schedule:
     # GitHub Actions cron uses UTC. Beijing time is UTC+8.
-    # 11:00 CST -> 03:00 UTC, 16:00 CST -> 08:00 UTC.
-    # Force a workflow-file change so the scheduler re-reads the cron expression.
-    - cron: "0 3 * * *"
-    - cron: "0 8 * * *"
+    # Run a few minutes past the hour to reduce GitHub's top-of-hour queueing.
+    # 11:07 CST -> 03:07 UTC, 16:17 CST -> 08:17 UTC.
+    - cron: "7 3 * * *"
+    - cron: "17 8 * * *"
   workflow_dispatch:
     inputs:
       force_send:
@@ -59,10 +59,12 @@ jobs:
       - name: Persist sent-state
         if: always()
         run: |
-          if [ -f .github/fund-report-state.json ] && ! git diff --quiet -- .github/fund-report-state.json; then
+          if [ -f .github/fund-report-state.json ]; then
+            git add .github/fund-report-state.json
+          fi
+          if ! git diff --cached --quiet -- .github/fund-report-state.json; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add .github/fund-report-state.json
             git commit -m "chore: update fund report sent state"
             git push
           fi
@@ -74,3 +76,4 @@ jobs:
           name: fund-report
           path: reports/*.html
           if-no-files-found: ignore
+

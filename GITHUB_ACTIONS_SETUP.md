@@ -5,7 +5,7 @@ This project is already prepared for scheduled delivery through GitHub Actions.
 ## What is already configured
 
 - Workflow file: `.github/workflows/daily-fund-report.yml`
-- Schedule: every day at `08:30` Asia/Shanghai
+- Schedule: every day at `11:07` and `16:17` Asia/Shanghai (staggered to avoid top-of-hour queueing)
 - Manual test trigger: `workflow_dispatch`
 - PushPlus token source: GitHub Actions secret `PUSHPLUS_TOKEN`
 
@@ -18,6 +18,7 @@ Push these files and folders:
 - `config.json`
 - `config.example.json`
 - `README.md`
+- `ai_market_briefing.py`
 
 Do not push:
 
@@ -67,7 +68,7 @@ Do not store the PushPlus token in `config.json`; GitHub Actions provides it thr
 GitHub Actions runs:
 
 ```yaml
-python daily_fund_report.py --send
+python daily_fund_report_runtime.py --send --twice-per-day
 ```
 
 The script already supports this flow:
@@ -75,8 +76,10 @@ The script already supports this flow:
 - load fund settings from `config.json`
 - read `PUSHPLUS_TOKEN` from environment
 - fetch latest fund history and estimate data
+- use the current Eastmoney JSON history API, with the legacy API as a fallback
 - generate the HTML report
 - send the report through PushPlus
+- persist the successful morning/afternoon state in the repository
 
 ## If delivery stops later
 
@@ -86,3 +89,5 @@ Check these places first:
 - secret `PUSHPLUS_TOKEN` still exists
 - `config.json` still contains valid fund codes
 - GitHub Actions is enabled for the repository
+- the Actions log does not report an empty fund-history response
+

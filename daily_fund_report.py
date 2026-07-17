@@ -19,6 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent
 REPORT_DIR = BASE_DIR / "reports"
 CONFIG_CANDIDATES = [BASE_DIR / "config.local.json", BASE_DIR / "config.json"]
 FUND_HISTORY_URL = "https://fundf10.eastmoney.com/F10DataApi.aspx"
+FUND_HISTORY_API_URL = "https://api.fund.eastmoney.com/f10/lsjz"
 ESTIMATE_URL = "https://fundgz.1234567.com.cn/js/{code}.js"
 INDEX_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
@@ -157,7 +158,7 @@ def parse_fund_history(text):
     return sorted(rows, key=lambda x: x["date"])
 
 
-def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
+def fetch_history_legacy(code, days=DEFAULT_HISTORY_DAYS):
     end = china_now().date()
     start = end - dt.timedelta(days=days)
     rows = []
@@ -191,6 +192,82 @@ def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
         raise RuntimeError(f"未取得基金 {code} 的历史净值")
     return sorted(rows, key=lambda x: x["date"])
 
+
+def parse_fund_history_api(text):
+    """Parse the Eastmoney JSON historical-NAV response."""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("fund history API returned invalid JSON") from exc
+
+    if payload.get("ErrCode") not in (None, 0):
+        message = payload.get("ErrMsg") or payload.get("ErrCode")
+        raise RuntimeError(f"fund history API error: {message}")
+
+    records = (payload.get("Data") or {}).get("LSJZList") or []
+    rows = []
+    for record in records:
+        date = str(record.get("FSRQ") or "")
+        nav = to_float(record.get("DWJZ"))
+        if nav is None or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            continue
+        rows.append(
+            {
+                "date": date,
+                "nav": nav,
+                "acc_nav": to_float(record.get("LJJZ")),
+                "growth": to_float(record.get("JZZZL")),
+                "buy_status": str(record.get("SGZT") or ""),
+                "sell_status": str(record.get("SHZT") or ""),
+            }
+        )
+    return sorted(rows, key=lambda x: x["date"]), int(payload.get("TotalCount") or 0)
+
+
+def fetch_history_api(code, days=DEFAULT_HISTORY_DAYS):
+    """Fetch history from Eastmoney's current JSON API."""
+    end = china_now().date()
+    start = end - dt.timedelta(days=days)
+    rows = []
+    seen_dates = set()
+    page = 1
+    page_size = 100
+    total_count = None
+    while total_count is None or (page - 1) * page_size < total_count:
+        params = {
+            "fundCode": code,
+            "pageIndex": str(page),
+            "pageSize": str(page_size),
+            "startDate": start.isoformat(),
+            "endDate": end.isoformat(),
+        }
+        url = FUND_HISTORY_API_URL + "?" + urllib.parse.urlencode(params)
+        text = http_get(url, referer="https://fundf10.eastmoney.com/")
+        page_rows, reported_total = parse_fund_history_api(text)
+        total_count = reported_total or total_count
+        if not page_rows:
+            break
+        for row in page_rows:
+            if row["date"] not in seen_dates:
+                rows.append(row)
+                seen_dates.add(row["date"])
+        page += 1
+        time.sleep(0.06)
+    if not rows:
+        raise RuntimeError("fund history JSON API returned no records")
+    return sorted(rows, key=lambda x: x["date"])
+
+
+def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
+    """Use the JSON API first and fall back to the legacy HTML endpoint."""
+    errors = []
+    for name, fetcher in (("JSON", fetch_history_api), ("legacy", fetch_history_legacy)):
+        try:
+            return fetcher(code, days)
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+            print(f"WARN: fund history source {name} failed for {code}: {exc}", file=sys.stderr)
+    raise RuntimeError("unable to fetch fund history for " + str(code) + ": " + "; ".join(errors))
 
 def fetch_estimate(code):
     try:
@@ -1167,7 +1244,7 @@ def main():
         print(f"pushplus_content_chars={len(push_content)}")
         result = send_pushplus(config, title, push_content)
         print(result)
-        if args.twice_per_day:
+        if args.twice_per_day and slot and not args.force_send:
             latest = items[0]["summary"] if items else {}
             slot_state = {
                 "date": today,
