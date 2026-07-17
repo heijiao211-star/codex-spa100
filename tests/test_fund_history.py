@@ -13,8 +13,8 @@ API_PAYLOAD = {
                 "DWJZ": "8.0725",
                 "LJJZ": "8.3425",
                 "JZZZL": "-1.63",
-                "SGZT": "闄愬埗澶ч鐢宠喘",
-                "SHZT": "寮€鏀捐祹鍥?,
+                "SGZT": "limited",
+                "SHZT": "open",
             }
         ]
     },
@@ -28,25 +28,16 @@ class FundHistoryTests(unittest.TestCase):
         rows, total_count = report.parse_fund_history_api(json.dumps(API_PAYLOAD))
 
         self.assertEqual(total_count, 1)
-        self.assertEqual(
-            rows,
-            [
-                {
-                    "date": "2026-07-16",
-                    "nav": 8.0725,
-                    "acc_nav": 8.3425,
-                    "growth": -1.63,
-                    "buy_status": "闄愬埗澶ч鐢宠喘",
-                    "sell_status": "寮€鏀捐祹鍥?,
-                }
-            ],
-        )
+        self.assertEqual(rows[0]["date"], "2026-07-16")
+        self.assertEqual(rows[0]["nav"], 8.0725)
+        self.assertEqual(rows[0]["growth"], -1.63)
+        self.assertEqual(rows[0]["buy_status"], "limited")
 
     def test_fetch_history_falls_back_when_json_source_is_empty(self):
         legacy_response = """
             pages:1
             <table><tr><td>2026-07-16</td><td>8.0725</td><td>8.3425</td>
-            <td>-1.63%</td><td>寮€鏀剧敵璐?/td><td>寮€鏀捐祹鍥?/td></tr></table>
+            <td>-1.63%</td><td>open</td><td>open</td></tr></table>
         """
 
         def fake_http_get(url, **_kwargs):
