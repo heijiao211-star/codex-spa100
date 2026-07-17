@@ -18,8 +18,8 @@ from ai_market_briefing import build_market_briefing, render_market_briefing_htm
 BASE_DIR = Path(__file__).resolve().parent
 REPORT_DIR = BASE_DIR / "reports"
 CONFIG_CANDIDATES = [BASE_DIR / "config.local.json", BASE_DIR / "config.json"]
+FUND_HISTORY_URL = "https://fundf10.eastmoney.com/F10DataApi.aspx"
 FUND_HISTORY_API_URL = "https://api.fund.eastmoney.com/f10/lsjz"
-FUND_HISTORY_LEGACY_URL = "https://fundf10.eastmoney.com/F10DataApi.aspx"
 ESTIMATE_URL = "https://fundgz.1234567.com.cn/js/{code}.js"
 INDEX_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
@@ -28,7 +28,7 @@ DEFAULT_HISTORY_DAYS = 1200
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_STATE_FILE = BASE_DIR / ".github" / "fund-report-state.json"
 DEFAULT_BENCHMARKS = [
-    {"type": "fund", "code": "513300", "label": "鍙傝€冨熀鍑嗭細绾虫柉杈惧厠100ETF", "color": "#7c3aed"},
+    {"type": "fund", "code": "513300", "label": "参考基准：纳斯达克100ETF", "color": "#7c3aed"},
 ]
 
 
@@ -52,7 +52,7 @@ def load_config():
             config.setdefault("history_days", DEFAULT_HISTORY_DAYS)
             config.setdefault(
                 "source_note",
-                "涓绘暟鎹浐瀹氫娇鐢ㄦ敮浠樺疂鍙喘涔扮殑鍩洪噾浠ｇ爜 270042锛堝箍鍙戠撼鏂揪鍏?00ETF鑱旀帴A锛夊噣鍊煎彛寰勶紱鍩哄噯鍥惧彧浣滃弬鑰冿紝涓嶆妸缇庤偂绾虫柉杈惧厠鎸囨暟褰撲綔浣犵殑鎸佷粨鏁版嵁銆?,
+                "主数据固定使用支付宝可购买的基金代码 270042（广发纳斯达克100ETF联接A）净值口径；基准图只作参考，不把美股纳斯达克指数当作你的持仓数据。",
             )
             if "benchmarks" not in config:
                 config["benchmarks"] = [dict(item) for item in DEFAULT_BENCHMARKS]
@@ -114,7 +114,7 @@ def quickchart_url(chart_config, width=760, height=380):
     result = http_post_json(QUICKCHART_CREATE_URL, payload, timeout=35, retries=3)
     data = json.loads(result)
     if not data.get("success") or not data.get("url"):
-        raise RuntimeError(f"QuickChart 鐢熸垚澶辫触: {result}")
+        raise RuntimeError(f"QuickChart 生成失败: {result}")
     return data["url"]
 
 
@@ -158,15 +158,50 @@ def parse_fund_history(text):
     return sorted(rows, key=lambda x: x["date"])
 
 
+def fetch_history_legacy(code, days=DEFAULT_HISTORY_DAYS):
+    end = china_now().date()
+    start = end - dt.timedelta(days=days)
+    rows = []
+    seen_dates = set()
+    page = 1
+    pages = None
+    while pages is None or page <= pages:
+        params = {
+            "type": "lsjz",
+            "code": code,
+            "page": str(page),
+            "per": "20",
+            "sdate": start.isoformat(),
+            "edate": end.isoformat(),
+        }
+        url = FUND_HISTORY_URL + "?" + urllib.parse.urlencode(params)
+        text = http_get(url)
+        if pages is None:
+            match = re.search(r"pages:(\d+)", text)
+            pages = int(match.group(1)) if match else 1
+        page_rows = parse_fund_history(text)
+        if not page_rows:
+            break
+        for row in page_rows:
+            if row["date"] not in seen_dates:
+                rows.append(row)
+                seen_dates.add(row["date"])
+        page += 1
+        time.sleep(0.06)
+    if not rows:
+        raise RuntimeError(f"未取得基金 {code} 的历史净值")
+    return sorted(rows, key=lambda x: x["date"])
+
+
 def parse_fund_history_api(text):
     """Parse Eastmoney's JSON historical-NAV API response."""
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("鍩洪噾鍘嗗彶鎺ュ彛杩斿洖浜嗘棤鏁堢殑 JSON") from exc
+        raise RuntimeError("fund history API returned invalid JSON") from exc
 
     if payload.get("ErrCode") not in (None, 0):
-        raise RuntimeError(f"鍩洪噾鍘嗗彶鎺ュ彛杩斿洖閿欒: {payload.get('ErrMsg') or payload.get('ErrCode')}")
+        raise RuntimeError(f"fund history API error: {payload.get('ErrMsg') or payload.get('ErrCode')}")
 
     records = (payload.get("Data") or {}).get("LSJZList") or []
     rows = []
@@ -188,13 +223,10 @@ def parse_fund_history_api(text):
     return sorted(rows, key=lambda x: x["date"]), int(payload.get("TotalCount") or 0)
 
 
-def fetch_history_api(code, start, end):
-    """Fetch history from Eastmoney's current JSON API.
-
-    The legacy HTML endpoint sometimes replies with a successful but empty body
-    (``var apidata=``).  The JSON endpoint is the primary source because it
-    makes that failure detectable and exposes pagination metadata.
-    """
+def fetch_history_api(code, days=DEFAULT_HISTORY_DAYS):
+    """Fetch history from Eastmoney's current JSON API."""
+    end = china_now().date()
+    start = end - dt.timedelta(days=days)
     rows = []
     seen_dates = set()
     page = 1
@@ -221,55 +253,20 @@ def fetch_history_api(code, start, end):
         page += 1
         time.sleep(0.06)
     if not rows:
-        raise RuntimeError("鍩洪噾鍘嗗彶 JSON 鎺ュ彛杩斿洖绌烘暟鎹?)
-    return sorted(rows, key=lambda x: x["date"])
-
-
-def fetch_history_legacy(code, start, end):
-    """Fallback for the older Eastmoney HTML endpoint."""
-    rows = []
-    seen_dates = set()
-    page = 1
-    pages = None
-    while pages is None or page <= pages:
-        params = {
-            "type": "lsjz",
-            "code": code,
-            "page": str(page),
-            "per": "20",
-            "sdate": start.isoformat(),
-            "edate": end.isoformat(),
-        }
-        url = FUND_HISTORY_LEGACY_URL + "?" + urllib.parse.urlencode(params)
-        text = http_get(url)
-        if pages is None:
-            match = re.search(r"pages:(\d+)", text)
-            pages = int(match.group(1)) if match else 1
-        page_rows = parse_fund_history(text)
-        if not page_rows:
-            break
-        for row in page_rows:
-            if row["date"] not in seen_dates:
-                rows.append(row)
-                seen_dates.add(row["date"])
-        page += 1
-        time.sleep(0.06)
-    if not rows:
-        raise RuntimeError("鍩洪噾鍘嗗彶鏃ф帴鍙ｈ繑鍥炵┖鏁版嵁")
+        raise RuntimeError("fund history JSON API returned no records")
     return sorted(rows, key=lambda x: x["date"])
 
 
 def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
-    end = china_now().date()
-    start = end - dt.timedelta(days=days)
+    """Use the JSON API first and fall back to the legacy HTML endpoint."""
     errors = []
     for name, fetcher in (("JSON", fetch_history_api), ("legacy", fetch_history_legacy)):
         try:
-            return fetcher(code, start, end)
+            return fetcher(code, days)
         except Exception as exc:
             errors.append(f"{name}: {exc}")
             print(f"WARN: fund history source {name} failed for {code}: {exc}", file=sys.stderr)
-    raise RuntimeError(f"鏈彇寰楀熀閲?{code} 鐨勫巻鍙插噣鍊硷紙{'锛?.join(errors)}锛?)
+    raise RuntimeError(f"unable to fetch fund history for {code}: {'; '.join(errors)}")
 
 
 def fetch_estimate(code):
@@ -329,7 +326,7 @@ def fetch_index_history(secid, days=DEFAULT_HISTORY_DAYS):
         )
         prev_nav = nav
     if not rows:
-        raise RuntimeError(f"鏈彇寰楀熀鍑?{secid} 鐨勫巻鍙叉暟鎹?)
+        raise RuntimeError(f"未取得基准 {secid} 的历史数据")
     return {"label": data.get("name") or secid, "rows": rows}
 
 
@@ -411,12 +408,12 @@ def color_for(value):
 
 def direction_text(value):
     if value is None:
-        return "鏆傛棤娑ㄨ穼鏁版嵁"
+        return "暂无涨跌数据"
     if value > 0:
-        return "涓婃定"
+        return "上涨"
     if value < 0:
-        return "涓嬭穼"
-    return "鎸佸钩"
+        return "下跌"
+    return "持平"
 
 
 def sample_rows(rows, max_points):
@@ -548,17 +545,36 @@ def svg_multi_line(series_list, width=760, height=270, value_kind="number", max_
     if d_min == d_max:
         d_max += 1
     if v_min == v_max:
-        span = abs(v_m…4178 tokens truncated…ree_year_rows, color=color, fill_id=f"fill3y{index}", full_dates=True, max_points=110)}
-  <h3>鍥炴挙鏇茬嚎</h3>
-  {svg_multi_line([points_to_series(build_drawdown_points(three_year_rows), "鍥炴挙", "#b42318")], value_kind="pct", strong=True)}
-  <h3>鍩洪噾 vs 鍙傝€冨熀鍑嗗姣斿浘</h3>
-  {svg_multi_line(compare_series, value_kind="pct") if len(compare_series) > 1 else '<p class="note">鏈厤缃弬鑰冨熀鍑嗐€?/p>'}
+        span = abs(v_min) * 0.08 or 1
+        v_min -= span
+        v_max += span
+    plot_w = width - pad_l - pad_r
+    plot_h = height - pad_t - pad_b
+
+    def xy(point):
+        day = dt.date.fromisoformat(point["date"]).toordinal()
+        x = pad_l + (day - d_min) / (d_max - d_min) * plot_w
+        y = pad_t + (v_max - point["value"])…3895 tokens truncated…ics">{''.join(metrics)}</div>
+  <h3>近7个净值日趋势</h3>
+  {svg_line(seven_rows, height=200, color=color, fill_id=f"fill7{index}")}
+  <h3>近7个净值日涨跌</h3>
+  {svg_bars(rows)}
+  <h3>近1个月净值趋势图</h3>
+  {svg_line(one_month_rows, color=color, fill_id=f"fill1m{index}", full_dates=True, max_points=42)}
+  <h3>近1年净值趋势图</h3>
+  {svg_line(one_year_rows, color=color, fill_id=f"fill1y{index}", full_dates=True, max_points=96)}
+  <h3>近3年净值趋势图</h3>
+  {svg_line(three_year_rows, color=color, fill_id=f"fill3y{index}", full_dates=True, max_points=110)}
+  <h3>回撤曲线</h3>
+  {svg_multi_line([points_to_series(build_drawdown_points(three_year_rows), "回撤", "#b42318")], value_kind="pct", strong=True)}
+  <h3>基金 vs 参考基准对比图</h3>
+  {svg_multi_line(compare_series, value_kind="pct") if len(compare_series) > 1 else '<p class="note">未配置参考基准。</p>'}
 </section>"""
 
 
 def build_report(items, benchmarks, config, market_briefing):
     now = china_now().strftime("%Y-%m-%d %H:%M")
-    title = config.get("title", "绾虫柉杈惧厠100鍩洪噾瀹氭姇鏃ユ姤")
+    title = config.get("title", "纳斯达克100基金定投日报")
     cards = "\n".join(build_card(item, benchmarks, idx) for idx, item in enumerate(items))
     data_rows = []
     for item in items:
@@ -631,15 +647,15 @@ def build_report(items, benchmarks, config, market_briefing):
 <main class="wrap">
   <section class="hero">
     <h1>{html.escape(title)}</h1>
-    <p>鐢熸垚鏃堕棿锛歿now}銆倇html.escape(config.get('source_note', '涓绘暟鎹浐瀹氫娇鐢ㄥ熀閲戜唬鐮?270042銆?))}</p>
+    <p>生成时间：{now}。{html.escape(config.get('source_note', '主数据固定使用基金代码 270042。'))}</p>
   </section>
   {render_market_briefing_html(market_briefing)}
   {cards}
   <table>
-    <thead><tr><th>鍩洪噾</th><th>鍑€鍊兼棩</th><th>鏈€鏂板噣鍊?/th><th>褰撴棩娑ㄨ穼</th><th>杩?鏃?/th><th>杩?鏈?/th><th>杩?骞?/th><th>杩?骞?/th><th>鏈€澶у洖鎾?/th></tr></thead>
+    <thead><tr><th>基金</th><th>净值日</th><th>最新净值</th><th>当日涨跌</th><th>近7日</th><th>近1月</th><th>近1年</th><th>近3年</th><th>最大回撤</th></tr></thead>
     <tbody>{''.join(data_rows)}</tbody>
   </table>
-  <p class="note">璇存槑锛氱孩鑹蹭唬琛ㄤ笂娑紝缁胯壊浠ｈ〃涓嬭穼銆備富鏁版嵁鍥哄畾涓烘敮浠樺疂鍙喘涔板熀閲戜唬鐮?270042锛堝箍鍙戠撼鏂揪鍏?00ETF鑱旀帴A锛夌殑鍑€鍊?浼扮畻鍙ｅ緞锛涘弬鑰冨熀鍑嗕粎鐢ㄤ簬瓒嬪娍瀵圭収锛屼笉浠ｈ〃浣犵殑鏀粯瀹濇寔浠撴暟鎹€傛湰绠€鎶ヤ粎鐢ㄤ簬瀹氭姇鑺傚鍙傝€冿紝涓嶆瀯鎴愪釜鎬у寲鎶曡祫寤鸿銆?/p>
+  <p class="note">说明：红色代表上涨，绿色代表下跌。主数据固定为支付宝可购买基金代码 270042（广发纳斯达克100ETF联接A）的净值/估算口径；参考基准仅用于趋势对照，不代表你的支付宝持仓数据。本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
 </main>
 </body>
 </html>"""
@@ -647,7 +663,7 @@ def build_report(items, benchmarks, config, market_briefing):
 
 def build_pushplus_report(items, benchmarks, config, market_briefing):
     now = china_now().strftime("%Y-%m-%d %H:%M")
-    title = config.get("title", "绾虫柉杈惧厠100鍩洪噾瀹氭姇鏃ユ姤")
+    title = config.get("title", "纳斯达克100基金定投日报")
     rows = []
     cards = []
     for item in items:
@@ -680,24 +696,24 @@ def build_pushplus_report(items, benchmarks, config, market_briefing):
 <section class="fund-card">
   <div class="fund-top">
     <div>
-      <div class="code">{html.escape(fund['code'])} 路 鏀粯瀹濆熀閲戝彛寰?/div>
+      <div class="code">{html.escape(fund['code'])} · 支付宝基金口径</div>
       <h2>{html.escape(name)}</h2>
-      <p class="sub">鍑€鍊兼棩 {summary['latest_date']}</p>
+      <p class="sub">净值日 {summary['latest_date']}</p>
     </div>
   </div>
   <div class="daily-box" style="border-color:{daily_color}55;background:{daily_color}10;">
-    <span>{html.escape(summary.get('daily_change_label') or '娑ㄨ穼')}</span>
+    <span>{html.escape(summary.get('daily_change_label') or '涨跌')}</span>
     <b style="color:{daily_color};">{direction_text(summary.get('daily_change'))}</b>
     <strong style="color:{daily_color};">{daily}</strong>
   </div>
   <div class="metric-grid">
-    <div><span>鏈€鏂板噣鍊?/span><b>{fmt_num(summary['latest_nav'])}</b></div>
-    <div><span>杩?鍑€鍊兼棩</span><b style="color:{color_for(summary['return_7d'])};">{r7}</b></div>
-    <div><span>杩?涓湀</span><b style="color:{color_for(summary['return_30d'])};">{one_month}</b></div>
-    <div><span>杩?骞?/span><b style="color:{color_for(summary['return_1y'])};">{one_year}</b></div>
-    <div><span>杩?骞?/span><b style="color:{color_for(summary['return_3y'])};">{three_year}</b></div>
-    <div><span>鏈€澶у洖鎾?/span><b>{drawdown}</b></div>
-    <div><span>骞村寲娉㈠姩</span><b>{vol}</b></div>
+    <div><span>最新净值</span><b>{fmt_num(summary['latest_nav'])}</b></div>
+    <div><span>近7净值日</span><b style="color:{color_for(summary['return_7d'])};">{r7}</b></div>
+    <div><span>近1个月</span><b style="color:{color_for(summary['return_30d'])};">{one_month}</b></div>
+    <div><span>近1年</span><b style="color:{color_for(summary['return_1y'])};">{one_year}</b></div>
+    <div><span>近3年</span><b style="color:{color_for(summary['return_3y'])};">{three_year}</b></div>
+    <div><span>最大回撤</span><b>{drawdown}</b></div>
+    <div><span>年化波动</span><b>{vol}</b></div>
   </div>
   {pushplus_chart_images(item, benchmarks)}
 </section>"""
@@ -748,15 +764,15 @@ def build_pushplus_report(items, benchmarks, config, market_briefing):
   <main class="wrap">
     <section class="hero">
       <h1>{html.escape(title)}</h1>
-      <p>鐢熸垚鏃堕棿锛歿now}銆倇html.escape(config.get('source_note', '涓绘暟鎹浐瀹氫娇鐢ㄥ熀閲戜唬鐮?270042銆?))}</p>
+      <p>生成时间：{now}。{html.escape(config.get('source_note', '主数据固定使用基金代码 270042。'))}</p>
     </section>
     {render_market_briefing_html(market_briefing, compact=True)}
     {''.join(cards)}
     <table>
-      <thead><tr><th>鍩洪噾</th><th>鍑€鍊兼棩</th><th>鍑€鍊?/th><th>褰撴棩</th><th>杩?鏃?/th><th>杩?骞?/th><th>鏈€澶у洖鎾?/th></tr></thead>
+      <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近7日</th><th>近1年</th><th>最大回撤</th></tr></thead>
       <tbody>{''.join(rows)}</tbody>
     </table>
-    <p class="note">涓绘暟鎹浐瀹氫负鏀粯瀹濆彲璐拱鍩洪噾浠ｇ爜 270042锛堝箍鍙戠撼鏂揪鍏?00ETF鑱旀帴A锛夌殑鍑€鍊?浼扮畻鍙ｅ緞锛涘弬鑰冨熀鍑嗗彧鐢ㄤ簬瀵圭収锛屼笉浠ｈ〃浣犵殑鏀粯瀹濇寔浠撱€傛湰绠€鎶ヤ粎鐢ㄤ簬瀹氭姇鑺傚鍙傝€冿紝涓嶆瀯鎴愪釜鎬у寲鎶曡祫寤鸿銆?/p>
+    <p class="note">主数据固定为支付宝可购买基金代码 270042（广发纳斯达克100ETF联接A）的净值/估算口径；参考基准只用于对照，不代表你的支付宝持仓。本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
   </main>
 </body>
 </html>"""
@@ -800,7 +816,7 @@ def collect_benchmarks(config, days):
 def send_pushplus(config, title, content):
     token = os.environ.get("PUSHPLUS_TOKEN") or config.get("pushplus_token")
     if not token:
-        raise RuntimeError("鏈厤缃?PushPlus token")
+        raise RuntimeError("未配置 PushPlus token")
     payload = {"token": token, "title": title, "content": content, "template": "html"}
     topic = config.get("pushplus_topic")
     if topic:
@@ -809,10 +825,10 @@ def send_pushplus(config, title, content):
     try:
         result_data = json.loads(result)
     except json.JSONDecodeError:
-        raise RuntimeError(f"PushPlus 杩斿洖浜嗘棤娉曡В鏋愮殑鍝嶅簲: {result}") from None
+        raise RuntimeError(f"PushPlus 返回了无法解析的响应: {result}") from None
     if result_data.get("code") != 200:
         msg = result_data.get("msg") or result_data.get("data") or result
-        raise RuntimeError(f"PushPlus 鍙戦€佸け璐? code={result_data.get('code')} msg={msg}")
+        raise RuntimeError(f"PushPlus 发送失败: code={result_data.get('code')} msg={msg}")
     return result
 
 
@@ -857,7 +873,7 @@ def main():
 
     config = load_config()
     if not config.get("funds"):
-        raise RuntimeError("閰嶇疆閲屾病鏈?funds")
+        raise RuntimeError("配置里没有 funds")
 
     state_path = resolve_path(args.state_file)
     today = china_now().date().isoformat()
@@ -878,7 +894,7 @@ def main():
     out_path = REPORT_DIR / f"fund-report-{today}.html"
     out_path.write_text(report, encoding="utf-8")
 
-    title = f"{config.get('title', '绾虫柉杈惧厠100鍩洪噾瀹氭姇鏃ユ姤')} {today}"
+    title = f"{config.get('title', '纳斯达克100基金定投日报')} {today}"
     print(f"report={out_path}")
     if args.send and not args.dry_run:
         push_content = build_pushplus_report(items, benchmarks, config, market_briefing)
