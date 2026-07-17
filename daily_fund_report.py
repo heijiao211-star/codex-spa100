@@ -18,7 +18,8 @@ from ai_market_briefing import build_market_briefing, render_market_briefing_htm
 BASE_DIR = Path(__file__).resolve().parent
 REPORT_DIR = BASE_DIR / "reports"
 CONFIG_CANDIDATES = [BASE_DIR / "config.local.json", BASE_DIR / "config.json"]
-FUND_HISTORY_URL = "https://fundf10.eastmoney.com/F10DataApi.aspx"
+FUND_HISTORY_API_URL = "https://api.fund.eastmoney.com/f10/lsjz"
+FUND_HISTORY_LEGACY_URL = "https://fundf10.eastmoney.com/F10DataApi.aspx"
 ESTIMATE_URL = "https://fundgz.1234567.com.cn/js/{code}.js"
 INDEX_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
@@ -27,7 +28,7 @@ DEFAULT_HISTORY_DAYS = 1200
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_STATE_FILE = BASE_DIR / ".github" / "fund-report-state.json"
 DEFAULT_BENCHMARKS = [
-    {"type": "fund", "code": "513300", "label": "参考基准：纳斯达克100ETF", "color": "#7c3aed"},
+    {"type": "fund", "code": "513300", "label": "鍙傝€冨熀鍑嗭細绾虫柉杈惧厠100ETF", "color": "#7c3aed"},
 ]
 
 
@@ -51,7 +52,7 @@ def load_config():
             config.setdefault("history_days", DEFAULT_HISTORY_DAYS)
             config.setdefault(
                 "source_note",
-                "主数据固定使用支付宝可购买的基金代码 270042（广发纳斯达克100ETF联接A）净值口径；基准图只作参考，不把美股纳斯达克指数当作你的持仓数据。",
+                "涓绘暟鎹浐瀹氫娇鐢ㄦ敮浠樺疂鍙喘涔扮殑鍩洪噾浠ｇ爜 270042锛堝箍鍙戠撼鏂揪鍏?00ETF鑱旀帴A锛夊噣鍊煎彛寰勶紱鍩哄噯鍥惧彧浣滃弬鑰冿紝涓嶆妸缇庤偂绾虫柉杈惧厠鎸囨暟褰撲綔浣犵殑鎸佷粨鏁版嵁銆?,
             )
             if "benchmarks" not in config:
                 config["benchmarks"] = [dict(item) for item in DEFAULT_BENCHMARKS]
@@ -113,7 +114,7 @@ def quickchart_url(chart_config, width=760, height=380):
     result = http_post_json(QUICKCHART_CREATE_URL, payload, timeout=35, retries=3)
     data = json.loads(result)
     if not data.get("success") or not data.get("url"):
-        raise RuntimeError(f"QuickChart 生成失败: {result}")
+        raise RuntimeError(f"QuickChart 鐢熸垚澶辫触: {result}")
     return data["url"]
 
 
@@ -157,9 +158,75 @@ def parse_fund_history(text):
     return sorted(rows, key=lambda x: x["date"])
 
 
-def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
-    end = china_now().date()
-    start = end - dt.timedelta(days=days)
+def parse_fund_history_api(text):
+    """Parse Eastmoney's JSON historical-NAV API response."""
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("鍩洪噾鍘嗗彶鎺ュ彛杩斿洖浜嗘棤鏁堢殑 JSON") from exc
+
+    if payload.get("ErrCode") not in (None, 0):
+        raise RuntimeError(f"鍩洪噾鍘嗗彶鎺ュ彛杩斿洖閿欒: {payload.get('ErrMsg') or payload.get('ErrCode')}")
+
+    records = (payload.get("Data") or {}).get("LSJZList") or []
+    rows = []
+    for record in records:
+        date = str(record.get("FSRQ") or "")
+        nav = to_float(record.get("DWJZ"))
+        if nav is None or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            continue
+        rows.append(
+            {
+                "date": date,
+                "nav": nav,
+                "acc_nav": to_float(record.get("LJJZ")),
+                "growth": to_float(record.get("JZZZL")),
+                "buy_status": str(record.get("SGZT") or ""),
+                "sell_status": str(record.get("SHZT") or ""),
+            }
+        )
+    return sorted(rows, key=lambda x: x["date"]), int(payload.get("TotalCount") or 0)
+
+
+def fetch_history_api(code, start, end):
+    """Fetch history from Eastmoney's current JSON API.
+
+    The legacy HTML endpoint sometimes replies with a successful but empty body
+    (``var apidata=``).  The JSON endpoint is the primary source because it
+    makes that failure detectable and exposes pagination metadata.
+    """
+    rows = []
+    seen_dates = set()
+    page = 1
+    page_size = 100
+    total_count = None
+    while total_count is None or (page - 1) * page_size < total_count:
+        params = {
+            "fundCode": code,
+            "pageIndex": str(page),
+            "pageSize": str(page_size),
+            "startDate": start.isoformat(),
+            "endDate": end.isoformat(),
+        }
+        url = FUND_HISTORY_API_URL + "?" + urllib.parse.urlencode(params)
+        text = http_get(url, referer="https://fundf10.eastmoney.com/")
+        page_rows, reported_total = parse_fund_history_api(text)
+        total_count = reported_total or total_count
+        if not page_rows:
+            break
+        for row in page_rows:
+            if row["date"] not in seen_dates:
+                rows.append(row)
+                seen_dates.add(row["date"])
+        page += 1
+        time.sleep(0.06)
+    if not rows:
+        raise RuntimeError("鍩洪噾鍘嗗彶 JSON 鎺ュ彛杩斿洖绌烘暟鎹?)
+    return sorted(rows, key=lambda x: x["date"])
+
+
+def fetch_history_legacy(code, start, end):
+    """Fallback for the older Eastmoney HTML endpoint."""
     rows = []
     seen_dates = set()
     page = 1
@@ -173,7 +240,7 @@ def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
             "sdate": start.isoformat(),
             "edate": end.isoformat(),
         }
-        url = FUND_HISTORY_URL + "?" + urllib.parse.urlencode(params)
+        url = FUND_HISTORY_LEGACY_URL + "?" + urllib.parse.urlencode(params)
         text = http_get(url)
         if pages is None:
             match = re.search(r"pages:(\d+)", text)
@@ -188,8 +255,21 @@ def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
         page += 1
         time.sleep(0.06)
     if not rows:
-        raise RuntimeError(f"未取得基金 {code} 的历史净值")
+        raise RuntimeError("鍩洪噾鍘嗗彶鏃ф帴鍙ｈ繑鍥炵┖鏁版嵁")
     return sorted(rows, key=lambda x: x["date"])
+
+
+def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
+    end = china_now().date()
+    start = end - dt.timedelta(days=days)
+    errors = []
+    for name, fetcher in (("JSON", fetch_history_api), ("legacy", fetch_history_legacy)):
+        try:
+            return fetcher(code, start, end)
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+            print(f"WARN: fund history source {name} failed for {code}: {exc}", file=sys.stderr)
+    raise RuntimeError(f"鏈彇寰楀熀閲?{code} 鐨勫巻鍙插噣鍊硷紙{'锛?.join(errors)}锛?)
 
 
 def fetch_estimate(code):
@@ -249,7 +329,7 @@ def fetch_index_history(secid, days=DEFAULT_HISTORY_DAYS):
         )
         prev_nav = nav
     if not rows:
-        raise RuntimeError(f"未取得基准 {secid} 的历史数据")
+        raise RuntimeError(f"鏈彇寰楀熀鍑?{secid} 鐨勫巻鍙叉暟鎹?)
     return {"label": data.get("name") or secid, "rows": rows}
 
 
@@ -331,12 +411,12 @@ def color_for(value):
 
 def direction_text(value):
     if value is None:
-        return "暂无涨跌数据"
+        return "鏆傛棤娑ㄨ穼鏁版嵁"
     if value > 0:
-        return "上涨"
+        return "涓婃定"
     if value < 0:
-        return "下跌"
-    return "持平"
+        return "涓嬭穼"
+    return "鎸佸钩"
 
 
 def sample_rows(rows, max_points):
@@ -468,379 +548,17 @@ def svg_multi_line(series_list, width=760, height=270, value_kind="number", max_
     if d_min == d_max:
         d_max += 1
     if v_min == v_max:
-        span = abs(v_min) * 0.08 or 1
-        v_min -= span
-        v_max += span
-    plot_w = width - pad_l - pad_r
-    plot_h = height - pad_t - pad_b
-
-    def xy(point):
-        day = dt.date.fromisoformat(point["date"]).toordinal()
-        x = pad_l + (day - d_min) / (d_max - d_min) * plot_w
-        y = pad_t + (v_max - point["value"]) / (v_max - v_min) * plot_h
-        return x, y
-
-    grid = []
-    labels = []
-    for step in range(5):
-        y = pad_t + plot_h * step / 4
-        value = v_max - (v_max - v_min) * step / 4
-        grid.append(f"<line x1='{pad_l}' y1='{y:.1f}' x2='{width - pad_r}' y2='{y:.1f}' />")
-        labels.append(f"<text x='{pad_l - 8}' y='{y + 4:.1f}' text-anchor='end'>{format_axis_value(value, value_kind)}</text>")
-
-    if v_min < 0 < v_max:
-        zero_y = pad_t + (v_max / (v_max - v_min)) * plot_h
-        grid.append(f"<line x1='{pad_l}' y1='{zero_y:.1f}' x2='{width - pad_r}' y2='{zero_y:.1f}' class='zero-line' />")
-
-    polylines = []
-    legends = []
-    stroke_width = "4.4" if strong else "3.4"
-    radius = "5" if strong else "4"
-    for idx, series in enumerate(prepared):
-        points = [xy(point) for point in series["points"]]
-        poly = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
-        polylines.append(
-            f"<polyline points='{poly}' fill='none' stroke='{series['color']}' stroke-width='{stroke_width}' "
-            f"stroke-linecap='round' stroke-linejoin='round'/>"
-            f"<circle cx='{points[-1][0]:.1f}' cy='{points[-1][1]:.1f}' r='{radius}' fill='{series['color']}'/>"
-        )
-        legend_x = pad_l + idx * 190
-        legends.append(
-            f"<rect x='{legend_x}' y='5' width='12' height='12' rx='3' fill='{series['color']}'/>"
-            f"<text x='{legend_x + 18}' y='15' fill='#475467' font-size='12'>{html.escape(series['label'])}</text>"
-        )
-
-    first_date = dt.date.fromordinal(d_min).isoformat()
-    last_date = dt.date.fromordinal(d_max).isoformat()
-    return f"""
-<svg viewBox="0 0 {width} {height}" class="chart" role="img">
-  <g class="legend">{''.join(legends)}</g>
-  <g class="grid">{''.join(grid)}</g>
-  <g class="axis-label">{''.join(labels)}</g>
-  {''.join(polylines)}
-  <text x="{pad_l}" y="{height - 11}" class="date-label">{first_date}</text>
-  <text x="{width - pad_r}" y="{height - 11}" text-anchor="end" class="date-label">{last_date}</text>
-</svg>"""
-
-
-def rows_to_series(rows, label, color, days=None, normalize=False, use_trend=True):
-    selected = rows_since_calendar_days(rows, days) if days else rows
-    points = []
-    base = None
-    for row in selected:
-        value = trend_value(row) if use_trend else row["nav"]
-        if base is None:
-            base = value
-        if normalize and base not in (None, 0):
-            value = (value / base - 1) * 100
-        points.append({"date": row["date"], "value": value})
-    return {"label": label, "color": color, "points": points}
-
-
-def points_to_series(points, label, color):
-    return {"label": label, "color": color, "points": points}
-
-
-def sample_chart_points(points, max_points):
-    sampled = sample_points(points, max_points)
-    return [point for point in sampled if point.get("value") is not None]
-
-
-def quickchart_tick_options(y_suffix="", min_value=None, max_value=None):
-    ticks = {"fontColor": "#667085", "fontSize": 11, "padding": 6}
-    if min_value is not None:
-        ticks["min"] = min_value
-    if max_value is not None:
-        ticks["max"] = max_value
-    if y_suffix == "%":
-        ticks["callback"] = "function(value) { return value + '%'; }"
-    return ticks
-
-
-def chart_line_config(title, series_list, y_suffix="", max_points=90, strong=False, min_value=None, max_value=None):
-    labels = []
-    datasets = []
-    for series in series_list:
-        points = sample_chart_points(series.get("points", []), max_points)
-        if not points:
-            continue
-        if not labels:
-            labels = [point["date"] for point in points]
-        values = align_series_to_labels(points, labels)
-        datasets.append(
-            {
-                "label": series["label"],
-                "data": values,
-                "borderColor": series["color"],
-                "backgroundColor": series["color"],
-                "borderWidth": 3.8 if strong else 2.8,
-                "pointRadius": 0,
-                "fill": False,
-                "tension": 0.15,
-                "lineTension": 0.15,
-            }
-        )
-    return {
-        "type": "line",
-        "data": {"labels": labels, "datasets": datasets},
-        "options": {
-            "responsive": True,
-            "maintainAspectRatio": False,
-            "layout": {"padding": {"left": 10, "right": 14, "top": 12, "bottom": 8}},
-            "title": {"display": True, "text": title, "fontSize": 18, "fontColor": "#111827", "fontStyle": "600", "padding": 16},
-            "legend": {"display": len(datasets) > 1, "position": "bottom", "labels": {"boxWidth": 10, "fontColor": "#475467", "padding": 14}},
-            "scales": {
-                "xAxes": [{"gridLines": {"display": False, "drawBorder": False}, "ticks": {"maxTicksLimit": 6, "fontColor": "#667085", "fontSize": 10}}],
-                "yAxes": [{"gridLines": {"color": "#eef2f6", "drawBorder": False}, "ticks": quickchart_tick_options(y_suffix, min_value, max_value)}],
-            },
-        },
-    }
-
-
-def chart_bar_config(title, rows):
-    rows = rows[-7:]
-    vals = [row["growth"] if row.get("growth") is not None else 0 for row in rows]
-    limit = max(0.25, max(abs(v) for v in vals) * 1.35) if vals else 1
-    return {
-        "type": "bar",
-        "data": {
-            "labels": [row["date"][5:] for row in rows],
-            "datasets": [
-                {
-                    "label": "日涨跌",
-                    "data": vals,
-                    "backgroundColor": ["#d92d20" if val >= 0 else "#039855" for val in vals],
-                    "barPercentage": 0.72,
-                    "categoryPercentage": 0.72,
-                }
-            ],
-        },
-        "options": {
-            "responsive": True,
-            "maintainAspectRatio": False,
-            "layout": {"padding": {"left": 10, "right": 14, "top": 12, "bottom": 8}},
-            "title": {"display": True, "text": title, "fontSize": 18, "fontColor": "#111827", "fontStyle": "600", "padding": 16},
-            "legend": {"display": False},
-            "scales": {
-                "xAxes": [{"gridLines": {"display": False, "drawBorder": False}, "ticks": {"fontColor": "#667085", "fontSize": 11}}],
-                "yAxes": [{"gridLines": {"color": "#eef2f6", "drawBorder": False, "zeroLineColor": "#98a2b3"}, "ticks": quickchart_tick_options("%", -limit, limit)}],
-            },
-        },
-    }
-
-
-def align_series_to_labels(points, labels):
-    by_date = {point["date"]: point["value"] for point in points}
-    ordered = sorted(points, key=lambda point: point["date"])
-    values = []
-    cursor = 0
-    last_value = None
-    for label in labels:
-        if label in by_date:
-            last_value = by_date[label]
-            values.append(last_value)
-            continue
-        while cursor < len(ordered) and ordered[cursor]["date"] <= label:
-            last_value = ordered[cursor]["value"]
-            cursor += 1
-        values.append(last_value)
-    return values
-
-
-def image_html(url, alt):
-    return (
-        f"<div class='chart-card'><img src='{html.escape(url)}' alt='{html.escape(alt)}' "
-        "style='width:100%;max-width:760px;display:block;border:0;border-radius:8px;'/></div>"
-    )
-
-
-def pushplus_chart_images(item, benchmarks):
-    fund = item["fund"]
-    rows = item["rows"]
-    estimate = item["estimate"] or {}
-    name = fund.get("label") or estimate.get("name") or fund["code"]
-    color = fund.get("color", "#2563eb")
-    seven_rows = rows[-7:]
-    one_month_rows = rows_since_calendar_days(rows, 30)
-    one_year_rows = rows_since_calendar_days(rows, 365)
-    three_year_rows = rows_since_calendar_days(rows, 365 * 3)
-    drawdown_points = build_drawdown_points(three_year_rows)
-    min_drawdown = min((point["value"] for point in drawdown_points), default=-1)
-
-    chart_specs = [
-        (f"{name} 近7个净值日趋势", chart_line_config(f"{name} 近7个净值日趋势", [rows_to_series(seven_rows, "净值", color, use_trend=True)], max_points=7, strong=True)),
-        (f"{name} 近7个净值日涨跌", chart_bar_config(f"{name} 近7个净值日涨跌", rows)),
-        (f"{name} 近1个月净值趋势", chart_line_config(f"{name} 近1个月净值趋势", [rows_to_series(one_month_rows, "净值", color, use_trend=True)], max_points=42, strong=True)),
-        (f"{name} 近1年净值趋势", chart_line_config(f"{name} 近1年净值趋势", [rows_to_series(one_year_rows, "净值", color, use_trend=True)], max_points=90, strong=True)),
-        (f"{name} 近3年净值趋势", chart_line_config(f"{name} 近3年净值趋势", [rows_to_series(three_year_rows, "净值", color, use_trend=True)], max_points=110, strong=True)),
-        (
-            f"{name} 回撤曲线",
-            chart_line_config(
-                f"{name} 回撤曲线",
-                [points_to_series(drawdown_points, "回撤", "#b42318")],
-                y_suffix="%",
-                max_points=110,
-                strong=True,
-                min_value=math.floor(min_drawdown),
-                max_value=0,
-            ),
-        ),
-    ]
-
-    compare_series = [rows_to_series(three_year_rows, name, color, normalize=True, use_trend=True)]
-    for benchmark in benchmarks:
-        compare_series.append(
-            rows_to_series(
-                benchmark["rows"],
-                benchmark["label"],
-                benchmark["color"],
-                days=365 * 3,
-                normalize=True,
-                use_trend=benchmark.get("use_trend", False),
-            )
-        )
-    if len(compare_series) > 1:
-        chart_specs.append((f"{name} vs 参考基准", chart_line_config(f"{name} vs 参考基准", compare_series, y_suffix="%", max_points=110)))
-
-    images = []
-    for alt, config in chart_specs:
-        try:
-            images.append(image_html(quickchart_url(config), alt))
-            time.sleep(0.12)
-        except Exception as exc:
-            print(f"WARN: chart failed {alt}: {exc}", file=sys.stderr)
-            images.append(f"<p class='note'>图表生成失败：{html.escape(alt)}。文字数据仍已正常生成。</p>")
-    return "".join(images)
-
-
-def summarize(rows, estimate):
-    latest = rows[-1]
-    trend_values = [trend_value(x) for x in rows]
-    latest_growth = latest.get("growth")
-    estimate_growth = estimate.get("estimate_growth") if estimate else None
-    seven_rows = rows[-7:]
-    one_year_rows = rows_since_calendar_days(rows, 365)
-    thirty_day_rows = rows_since_calendar_days(rows, 30)
-    three_year_rows = rows_since_calendar_days(rows, 365 * 3)
-    ma20 = moving_average(trend_values, 20)
-    ma60 = moving_average(trend_values, 60)
-    summary = {
-        "latest_date": latest["date"],
-        "latest_nav": latest["nav"],
-        "latest_trend_nav": trend_value(latest),
-        "latest_growth": latest_growth,
-        "daily_change": estimate_growth if estimate_growth is not None else latest_growth,
-        "daily_change_label": "估算涨跌" if estimate_growth is not None else "净值日涨跌",
-        "estimate_growth": estimate_growth,
-        "estimate_time": estimate.get("estimate_time", "") if estimate else "",
-        "return_7d": pct_change(trend_value(seven_rows[0]), trend_value(latest)) if len(seven_rows) > 1 else None,
-        "return_30d": pct_change(trend_value(thirty_day_rows[0]), trend_value(latest)) if len(thirty_day_rows) > 1 else None,
-        "return_1y": pct_change(trend_value(one_year_rows[0]), trend_value(latest)) if len(one_year_rows) > 1 else None,
-        "return_3y": pct_change(trend_value(three_year_rows[0]), trend_value(latest)) if len(three_year_rows) > 1 else None,
-        "drawdown_1y": max_drawdown([trend_value(x) for x in one_year_rows]),
-        "drawdown_3y": max_drawdown([trend_value(x) for x in three_year_rows]),
-        "vol_1y": annualized_volatility(one_year_rows),
-        "vol_3y": annualized_volatility(three_year_rows),
-        "ma20": ma20,
-        "ma60": ma60,
-    }
-    return summary
-
-
-def metric_cell(label, value, color=None):
-    style = f" style='color:{color}'" if color else ""
-    return f"<div><span>{html.escape(label)}</span><strong{style}>{value}</strong></div>"
-
-
-def change_panel(summary):
-    value = summary.get("daily_change")
-    color = color_for(value)
-    label = summary.get("daily_change_label") or "涨跌"
-    source = summary.get("estimate_time") if summary.get("estimate_growth") is not None else summary.get("latest_date")
-    return f"""
-  <div class="change-panel" style="border-color:{color}55;background:{color}10;">
-    <div>
-      <span>{html.escape(label)}</span>
-      <b style="color:{color};">{direction_text(value)}</b>
-      <small>{html.escape(source or '最新可得数据')}</small>
-    </div>
-    <strong style="color:{color};">{fmt_pct(value)}</strong>
-  </div>"""
-
-
-def build_compare_series(item, benchmarks, days=365 * 3):
-    fund = item["fund"]
-    rows = item["rows"]
-    estimate = item["estimate"] or {}
-    name = fund.get("label") or estimate.get("name") or fund["code"]
-    series = [rows_to_series(rows_since_calendar_days(rows, days), name, fund.get("color", "#2563eb"), normalize=True, use_trend=True)]
-    for benchmark in benchmarks:
-        series.append(rows_to_series(benchmark["rows"], benchmark["label"], benchmark["color"], days=days, normalize=True, use_trend=benchmark.get("use_trend", False)))
-    return series
-
-
-def build_card(item, benchmarks, index):
-    fund = item["fund"]
-    rows = item["rows"]
-    summary = item["summary"]
-    estimate = item["estimate"] or {}
-    name = fund.get("label") or estimate.get("name") or fund["code"]
-    color = fund.get("color", "#2563eb")
-    source_note = (
-        f"估算 {fmt_pct(summary['estimate_growth'])} · {summary['estimate_time']}"
-        if summary.get("estimate_growth") is not None
-        else f"最新净值日涨跌 {fmt_pct(summary['latest_growth'])}"
-    )
-
-    metrics = [
-        metric_cell("最新净值", fmt_num(summary["latest_nav"])),
-        metric_cell("净值日期", summary["latest_date"]),
-        metric_cell("近7净值日", fmt_pct(summary["return_7d"]), color_for(summary["return_7d"])),
-        metric_cell("近1个月", fmt_pct(summary["return_30d"]), color_for(summary["return_30d"])),
-        metric_cell("近1年", fmt_pct(summary["return_1y"]), color_for(summary["return_1y"])),
-        metric_cell("近3年", fmt_pct(summary["return_3y"]), color_for(summary["return_3y"])),
-        metric_cell("近1年回撤", fmt_pct(summary["drawdown_1y"], signed=False)),
-        metric_cell("近3年最大回撤", fmt_pct(summary["drawdown_3y"], signed=False)),
-        metric_cell("年化波动率", fmt_pct(summary["vol_3y"], signed=False)),
-    ]
-
-    seven_rows = rows[-7:]
-    one_month_rows = rows_since_calendar_days(rows, 30)
-    one_year_rows = rows_since_calendar_days(rows, 365)
-    three_year_rows = rows_since_calendar_days(rows, 365 * 3)
-    compare_series = build_compare_series(item, benchmarks)
-
-    return f"""
-<section class="fund-card">
-  <div class="fund-head">
-    <div>
-      <div class="fund-kicker">{html.escape(fund['code'])} · 支付宝基金口径</div>
-      <h2>{html.escape(name)}</h2>
-      <p>{html.escape(source_note)}</p>
-    </div>
-  </div>
-  {change_panel(summary)}
-  <div class="metrics">{''.join(metrics)}</div>
-  <h3>近7个净值日趋势</h3>
-  {svg_line(seven_rows, height=200, color=color, fill_id=f"fill7{index}")}
-  <h3>近7个净值日涨跌</h3>
-  {svg_bars(rows)}
-  <h3>近1个月净值趋势图</h3>
-  {svg_line(one_month_rows, color=color, fill_id=f"fill1m{index}", full_dates=True, max_points=42)}
-  <h3>近1年净值趋势图</h3>
-  {svg_line(one_year_rows, color=color, fill_id=f"fill1y{index}", full_dates=True, max_points=96)}
-  <h3>近3年净值趋势图</h3>
-  {svg_line(three_year_rows, color=color, fill_id=f"fill3y{index}", full_dates=True, max_points=110)}
-  <h3>回撤曲线</h3>
-  {svg_multi_line([points_to_series(build_drawdown_points(three_year_rows), "回撤", "#b42318")], value_kind="pct", strong=True)}
-  <h3>基金 vs 参考基准对比图</h3>
-  {svg_multi_line(compare_series, value_kind="pct") if len(compare_series) > 1 else '<p class="note">未配置参考基准。</p>'}
+        span = abs(v_m…4178 tokens truncated…ree_year_rows, color=color, fill_id=f"fill3y{index}", full_dates=True, max_points=110)}
+  <h3>鍥炴挙鏇茬嚎</h3>
+  {svg_multi_line([points_to_series(build_drawdown_points(three_year_rows), "鍥炴挙", "#b42318")], value_kind="pct", strong=True)}
+  <h3>鍩洪噾 vs 鍙傝€冨熀鍑嗗姣斿浘</h3>
+  {svg_multi_line(compare_series, value_kind="pct") if len(compare_series) > 1 else '<p class="note">鏈厤缃弬鑰冨熀鍑嗐€?/p>'}
 </section>"""
 
 
 def build_report(items, benchmarks, config, market_briefing):
     now = china_now().strftime("%Y-%m-%d %H:%M")
-    title = config.get("title", "纳斯达克100基金定投日报")
+    title = config.get("title", "绾虫柉杈惧厠100鍩洪噾瀹氭姇鏃ユ姤")
     cards = "\n".join(build_card(item, benchmarks, idx) for idx, item in enumerate(items))
     data_rows = []
     for item in items:
@@ -913,15 +631,15 @@ def build_report(items, benchmarks, config, market_briefing):
 <main class="wrap">
   <section class="hero">
     <h1>{html.escape(title)}</h1>
-    <p>生成时间：{now}。{html.escape(config.get('source_note', '主数据固定使用基金代码 270042。'))}</p>
+    <p>鐢熸垚鏃堕棿锛歿now}銆倇html.escape(config.get('source_note', '涓绘暟鎹浐瀹氫娇鐢ㄥ熀閲戜唬鐮?270042銆?))}</p>
   </section>
   {render_market_briefing_html(market_briefing)}
   {cards}
   <table>
-    <thead><tr><th>基金</th><th>净值日</th><th>最新净值</th><th>当日涨跌</th><th>近7日</th><th>近1月</th><th>近1年</th><th>近3年</th><th>最大回撤</th></tr></thead>
+    <thead><tr><th>鍩洪噾</th><th>鍑€鍊兼棩</th><th>鏈€鏂板噣鍊?/th><th>褰撴棩娑ㄨ穼</th><th>杩?鏃?/th><th>杩?鏈?/th><th>杩?骞?/th><th>杩?骞?/th><th>鏈€澶у洖鎾?/th></tr></thead>
     <tbody>{''.join(data_rows)}</tbody>
   </table>
-  <p class="note">说明：红色代表上涨，绿色代表下跌。主数据固定为支付宝可购买基金代码 270042（广发纳斯达克100ETF联接A）的净值/估算口径；参考基准仅用于趋势对照，不代表你的支付宝持仓数据。本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
+  <p class="note">璇存槑锛氱孩鑹蹭唬琛ㄤ笂娑紝缁胯壊浠ｈ〃涓嬭穼銆備富鏁版嵁鍥哄畾涓烘敮浠樺疂鍙喘涔板熀閲戜唬鐮?270042锛堝箍鍙戠撼鏂揪鍏?00ETF鑱旀帴A锛夌殑鍑€鍊?浼扮畻鍙ｅ緞锛涘弬鑰冨熀鍑嗕粎鐢ㄤ簬瓒嬪娍瀵圭収锛屼笉浠ｈ〃浣犵殑鏀粯瀹濇寔浠撴暟鎹€傛湰绠€鎶ヤ粎鐢ㄤ簬瀹氭姇鑺傚鍙傝€冿紝涓嶆瀯鎴愪釜鎬у寲鎶曡祫寤鸿銆?/p>
 </main>
 </body>
 </html>"""
@@ -929,7 +647,7 @@ def build_report(items, benchmarks, config, market_briefing):
 
 def build_pushplus_report(items, benchmarks, config, market_briefing):
     now = china_now().strftime("%Y-%m-%d %H:%M")
-    title = config.get("title", "纳斯达克100基金定投日报")
+    title = config.get("title", "绾虫柉杈惧厠100鍩洪噾瀹氭姇鏃ユ姤")
     rows = []
     cards = []
     for item in items:
@@ -962,24 +680,24 @@ def build_pushplus_report(items, benchmarks, config, market_briefing):
 <section class="fund-card">
   <div class="fund-top">
     <div>
-      <div class="code">{html.escape(fund['code'])} · 支付宝基金口径</div>
+      <div class="code">{html.escape(fund['code'])} 路 鏀粯瀹濆熀閲戝彛寰?/div>
       <h2>{html.escape(name)}</h2>
-      <p class="sub">净值日 {summary['latest_date']}</p>
+      <p class="sub">鍑€鍊兼棩 {summary['latest_date']}</p>
     </div>
   </div>
   <div class="daily-box" style="border-color:{daily_color}55;background:{daily_color}10;">
-    <span>{html.escape(summary.get('daily_change_label') or '涨跌')}</span>
+    <span>{html.escape(summary.get('daily_change_label') or '娑ㄨ穼')}</span>
     <b style="color:{daily_color};">{direction_text(summary.get('daily_change'))}</b>
     <strong style="color:{daily_color};">{daily}</strong>
   </div>
   <div class="metric-grid">
-    <div><span>最新净值</span><b>{fmt_num(summary['latest_nav'])}</b></div>
-    <div><span>近7净值日</span><b style="color:{color_for(summary['return_7d'])};">{r7}</b></div>
-    <div><span>近1个月</span><b style="color:{color_for(summary['return_30d'])};">{one_month}</b></div>
-    <div><span>近1年</span><b style="color:{color_for(summary['return_1y'])};">{one_year}</b></div>
-    <div><span>近3年</span><b style="color:{color_for(summary['return_3y'])};">{three_year}</b></div>
-    <div><span>最大回撤</span><b>{drawdown}</b></div>
-    <div><span>年化波动</span><b>{vol}</b></div>
+    <div><span>鏈€鏂板噣鍊?/span><b>{fmt_num(summary['latest_nav'])}</b></div>
+    <div><span>杩?鍑€鍊兼棩</span><b style="color:{color_for(summary['return_7d'])};">{r7}</b></div>
+    <div><span>杩?涓湀</span><b style="color:{color_for(summary['return_30d'])};">{one_month}</b></div>
+    <div><span>杩?骞?/span><b style="color:{color_for(summary['return_1y'])};">{one_year}</b></div>
+    <div><span>杩?骞?/span><b style="color:{color_for(summary['return_3y'])};">{three_year}</b></div>
+    <div><span>鏈€澶у洖鎾?/span><b>{drawdown}</b></div>
+    <div><span>骞村寲娉㈠姩</span><b>{vol}</b></div>
   </div>
   {pushplus_chart_images(item, benchmarks)}
 </section>"""
@@ -1030,15 +748,15 @@ def build_pushplus_report(items, benchmarks, config, market_briefing):
   <main class="wrap">
     <section class="hero">
       <h1>{html.escape(title)}</h1>
-      <p>生成时间：{now}。{html.escape(config.get('source_note', '主数据固定使用基金代码 270042。'))}</p>
+      <p>鐢熸垚鏃堕棿锛歿now}銆倇html.escape(config.get('source_note', '涓绘暟鎹浐瀹氫娇鐢ㄥ熀閲戜唬鐮?270042銆?))}</p>
     </section>
     {render_market_briefing_html(market_briefing, compact=True)}
     {''.join(cards)}
     <table>
-      <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近7日</th><th>近1年</th><th>最大回撤</th></tr></thead>
+      <thead><tr><th>鍩洪噾</th><th>鍑€鍊兼棩</th><th>鍑€鍊?/th><th>褰撴棩</th><th>杩?鏃?/th><th>杩?骞?/th><th>鏈€澶у洖鎾?/th></tr></thead>
       <tbody>{''.join(rows)}</tbody>
     </table>
-    <p class="note">主数据固定为支付宝可购买基金代码 270042（广发纳斯达克100ETF联接A）的净值/估算口径；参考基准只用于对照，不代表你的支付宝持仓。本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
+    <p class="note">涓绘暟鎹浐瀹氫负鏀粯瀹濆彲璐拱鍩洪噾浠ｇ爜 270042锛堝箍鍙戠撼鏂揪鍏?00ETF鑱旀帴A锛夌殑鍑€鍊?浼扮畻鍙ｅ緞锛涘弬鑰冨熀鍑嗗彧鐢ㄤ簬瀵圭収锛屼笉浠ｈ〃浣犵殑鏀粯瀹濇寔浠撱€傛湰绠€鎶ヤ粎鐢ㄤ簬瀹氭姇鑺傚鍙傝€冿紝涓嶆瀯鎴愪釜鎬у寲鎶曡祫寤鸿銆?/p>
   </main>
 </body>
 </html>"""
@@ -1082,7 +800,7 @@ def collect_benchmarks(config, days):
 def send_pushplus(config, title, content):
     token = os.environ.get("PUSHPLUS_TOKEN") or config.get("pushplus_token")
     if not token:
-        raise RuntimeError("未配置 PushPlus token")
+        raise RuntimeError("鏈厤缃?PushPlus token")
     payload = {"token": token, "title": title, "content": content, "template": "html"}
     topic = config.get("pushplus_topic")
     if topic:
@@ -1091,10 +809,10 @@ def send_pushplus(config, title, content):
     try:
         result_data = json.loads(result)
     except json.JSONDecodeError:
-        raise RuntimeError(f"PushPlus 返回了无法解析的响应: {result}") from None
+        raise RuntimeError(f"PushPlus 杩斿洖浜嗘棤娉曡В鏋愮殑鍝嶅簲: {result}") from None
     if result_data.get("code") != 200:
         msg = result_data.get("msg") or result_data.get("data") or result
-        raise RuntimeError(f"PushPlus 发送失败: code={result_data.get('code')} msg={msg}")
+        raise RuntimeError(f"PushPlus 鍙戦€佸け璐? code={result_data.get('code')} msg={msg}")
     return result
 
 
@@ -1139,7 +857,7 @@ def main():
 
     config = load_config()
     if not config.get("funds"):
-        raise RuntimeError("配置里没有 funds")
+        raise RuntimeError("閰嶇疆閲屾病鏈?funds")
 
     state_path = resolve_path(args.state_file)
     today = china_now().date().isoformat()
@@ -1160,14 +878,14 @@ def main():
     out_path = REPORT_DIR / f"fund-report-{today}.html"
     out_path.write_text(report, encoding="utf-8")
 
-    title = f"{config.get('title', '纳斯达克100基金定投日报')} {today}"
+    title = f"{config.get('title', '绾虫柉杈惧厠100鍩洪噾瀹氭姇鏃ユ姤')} {today}"
     print(f"report={out_path}")
     if args.send and not args.dry_run:
         push_content = build_pushplus_report(items, benchmarks, config, market_briefing)
         print(f"pushplus_content_chars={len(push_content)}")
         result = send_pushplus(config, title, push_content)
         print(result)
-        if args.twice_per_day:
+        if args.twice_per_day and slot and not args.force_send:
             latest = items[0]["summary"] if items else {}
             slot_state = {
                 "date": today,
@@ -1194,3 +912,4 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise
+
