@@ -1,26 +1,44 @@
 {
-  "title": "纳斯达克100基金定投日报",
-  "history_days": 1200,
-  "ai_briefing": {
-    "enabled": true,
-    "model": "deepseek-v4-flash",
-    "max_news": 5,
-    "timeout_seconds": 28
-  },
-  "pushplus_token": "把你的 PushPlus token 放到 config.local.json，或设置环境变量 PUSHPLUS_TOKEN",
-  "funds": [
+  "title": "支付宝可购买纳斯达克100场外基金日报",
+  "funds_file": "config/funds.json",
+  "history_days": 1900,
+  "max_nav_lag_days": 6,
+  "pushplus_token": "仅本地 config.local.json 使用；GitHub Actions 请配置 PUSHPLUS_TOKEN Secret",
+  "subscription_announcements": [
     {
-      "code": "270042",
-      "label": "纳斯达克100 · 广发纳指ETF联接A",
-      "color": "#2563eb"
+      "fund_code": "270042",
+      "share_class": "人民币A",
+      "currency": "CNY",
+      "status": "LIMITED",
+      "official_account_limit": "10000元",
+      "announcement_date": "2026-01-01",
+      "effective_date": "2026-01-02",
+      "business_scope": "申购、定投",
+      "source_url": "https://example.invalid/fund-manager-announcement"
     }
   ],
-  "benchmarks": [
+  "manual_alipay": {
+    "270042": {
+      "alipay_verified_limit": null,
+      "user_planned_amount": null,
+      "actual_order_amount": null,
+      "updated_at": null
+    }
+  },
+  "market_reference": {
+    "usd_cny": {"return": null, "data_date": null, "source": null},
+    "usd_asset": {"return": null, "session_date": null, "source": null},
+    "estimate_target_nav_date": null
+  },
+  "ai_news": [
     {
-      "type": "fund",
-      "code": "513300",
-      "label": "纳斯达克100ETF",
-      "color": "#7c3aed"
+      "title": "仅填写可核验的市场事件",
+      "published_at": "2026-01-01T09:00:00+08:00",
+      "event_date": "2026-01-01",
+      "source_url": "https://example.invalid/original-source",
+      "nasdaq100_relevance": "需明确说明关联，不确定时不要归因",
+      "confidence": "LOW"
     }
   ]
 }
+
