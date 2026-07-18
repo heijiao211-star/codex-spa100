@@ -46,7 +46,26 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Send report
+      - name: Install quality tools
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Static checks
+        run: |
+          ruff check .
+          mypy src/fund_report
+
+      - name: Unit tests
+        env:
+          PYTHONPATH: src
+        run: pytest -q
+
+      - name: Fetch, validate and generate report
+        run: python daily_fund_report_runtime.py --dry-run
+
+      - name: Validate latest JSON schema
+        run: python scripts/validate_latest.py
+
+      - name: Send PushPlus summary
         env:
           FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send == 'true' }}
         run: |
@@ -59,13 +78,14 @@ jobs:
       - name: Persist sent-state
         if: always()
         run: |
+          git add data/latest.json data/history.json 2>/dev/null || true
           if [ -f .github/fund-report-state.json ]; then
             git add .github/fund-report-state.json
           fi
-          if ! git diff --cached --quiet -- .github/fund-report-state.json; then
+          if ! git diff --cached --quiet; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "chore: update fund report sent state"
+            git commit -m "chore: update public fund report data"
             git push
           fi
 
@@ -76,4 +96,5 @@ jobs:
           name: fund-report
           path: reports/*.html
           if-no-files-found: ignore
+
 
