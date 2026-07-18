@@ -1,0 +1,57 @@
+{
+  "schema_version": "2.0",
+  "funds": [
+    {
+      "code": "270042",
+      "official_name": "广发纳斯达克100交易型开放式指数证券投资基金联接基金（QDII）人民币A",
+      "display_name": "广发纳指100ETF联接（QDII）人民币A",
+      "manager": "广发基金管理有限公司",
+      "share_class": "人民币A",
+      "currency": "CNY",
+      "fund_type": "QDII 场外公募基金",
+      "target_index": "纳斯达克100指数",
+      "target_etf": null,
+      "official_benchmark": "以基金合同和产品资料概要披露为准",
+      "official_product_url": null,
+      "official_announcement_url": null,
+      "platform": "支付宝（购买渠道）",
+      "invested": false,
+      "enabled": true
+    },
+    {
+      "code": "000834",
+      "official_name": "大成纳斯达克100交易型开放式指数证券投资基金联接基金（QDII）A",
+      "display_name": "大成纳斯达克100ETF联接（QDII）A",
+      "manager": "大成基金管理有限公司",
+      "share_class": "A",
+      "currency": "CNY",
+      "fund_type": "QDII 场外公募基金",
+      "target_index": "纳斯达克100指数",
+      "target_etf": null,
+      "official_benchmark": "以基金合同和产品资料概要披露为准",
+      "official_product_url": null,
+      "official_announcement_url": null,
+      "platform": "支付宝（购买渠道）",
+      "invested": false,
+      "enabled": true
+    },
+    {
+      "code": "019172",
+      "official_name": "摩根纳斯达克100指数型发起式证券投资基金（QDII）人民币A",
+      "display_name": "摩根纳斯达克100指数（QDII）人民币A",
+      "manager": "摩根基金管理（中国）有限公司",
+      "share_class": "人民币A",
+      "currency": "CNY",
+      "fund_type": "QDII 场外公募基金",
+      "target_index": "纳斯达克100指数",
+      "target_etf": null,
+      "official_benchmark": "以基金合同和产品资料概要披露为准",
+      "official_product_url": null,
+      "official_announcement_url": null,
+      "platform": "支付宝（购买渠道）",
+      "invested": false,
+      "enabled": true
+    }
+  ]
+}
+
