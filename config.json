@@ -1,26 +1,12 @@
 {
-  "title": "纳斯达克100基金定投日报",
-  "history_days": 1200,
-  "ai_briefing": {
-    "enabled": true,
-    "model": "deepseek-v4-flash",
-    "max_news": 5,
-    "timeout_seconds": 28
-  },
-  "source_note": "主数据固定使用支付宝可购买的基金代码 270042（广发纳斯达克100ETF联接A）净值口径；基准图只作参考，不把美股纳斯达克指数当作你的持仓数据。",
-  "funds": [
-    {
-      "code": "270042",
-      "label": "纳斯达克100 · 广发纳指ETF联接A（支付宝基金）",
-      "color": "#2563eb"
-    }
-  ],
-  "benchmarks": [
-    {
-      "type": "fund",
-      "code": "513300",
-      "label": "参考基准：纳斯达克100ETF",
-      "color": "#7c3aed"
-    }
-  ]
+  "title": "支付宝可购买纳斯达克100场外基金日报",
+  "funds_file": "config/funds.json",
+  "history_days": 1900,
+  "report_timezone": "Asia/Shanghai",
+  "max_nav_lag_days": 6,
+  "subscription_announcements": [],
+  "manual_alipay": {},
+  "ai_news": [],
+  "market_reference": {}
 }
+
