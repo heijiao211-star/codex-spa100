@@ -126,6 +126,7 @@ def fixed_pushplus_chart_images(item, benchmarks):
     one_month_rows = report.rows_since_calendar_days(rows, 30)
     one_year_rows = report.rows_since_calendar_days(rows, 365)
     three_year_rows = report.rows_since_calendar_days(rows, 365 * 3)
+    five_year_rows = report.rows_since_calendar_days(rows, report.FIVE_YEAR_DAYS)
     drawdown_points = report.build_drawdown_points(three_year_rows)
     min_drawdown = min((point["value"] for point in drawdown_points), default=-1)
     drawdown_floor = min(-1, math.floor(min_drawdown) - 1)
@@ -172,6 +173,16 @@ def fixed_pushplus_chart_images(item, benchmarks):
                 f"{name} 近3年净值趋势",
                 [report.rows_to_series(three_year_rows, "净值", color, use_trend=True)],
                 max_points=110,
+                strong=True,
+            ),
+            "",
+        ),
+        (
+            f"{name} 近5年净值趋势",
+            fixed_chart_line_config(
+                f"{name} 近5年净值趋势",
+                [report.rows_to_series(five_year_rows, "净值", color, use_trend=True)],
+                max_points=140,
                 strong=True,
             ),
             "",
