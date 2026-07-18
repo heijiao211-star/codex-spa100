@@ -24,7 +24,8 @@ ESTIMATE_URL = "https://fundgz.1234567.com.cn/js/{code}.js"
 INDEX_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 QUICKCHART_CREATE_URL = "https://quickchart.io/chart/create"
-DEFAULT_HISTORY_DAYS = 1200
+FIVE_YEAR_DAYS = 365 * 5
+DEFAULT_HISTORY_DAYS = FIVE_YEAR_DAYS + 60
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 DEFAULT_STATE_FILE = BASE_DIR / ".github" / "fund-report-state.json"
 DEFAULT_BENCHMARKS = [
@@ -190,7 +191,9 @@ def fetch_history_legacy(code, days=DEFAULT_HISTORY_DAYS):
         time.sleep(0.06)
     if not rows:
         raise RuntimeError(f"未取得基金 {code} 的历史净值")
-    return sorted(rows, key=lambda x: x["date"])
+    rows = sorted(rows, key=lambda x: x["date"])
+    validate_history_coverage(rows, days)
+    return rows
 
 
 def parse_fund_history_api(text):
@@ -224,6 +227,19 @@ def parse_fund_history_api(text):
     return sorted(rows, key=lambda x: x["date"]), int(payload.get("TotalCount") or 0)
 
 
+def validate_history_coverage(rows, days):
+    if not rows:
+        return
+    required_days = min(days, FIVE_YEAR_DAYS)
+    latest = dt.date.fromisoformat(rows[-1]["date"])
+    earliest = dt.date.fromisoformat(rows[0]["date"])
+    required_start = latest - dt.timedelta(days=required_days)
+    if earliest > required_start:
+        raise RuntimeError(
+            f"历史净值数据不足 {required_days} 天：最早 {rows[0]['date']}，最新 {rows[-1]['date']}"
+        )
+
+
 def fetch_history_api(code, days=DEFAULT_HISTORY_DAYS):
     """Fetch history from Eastmoney's current JSON API."""
     end = china_now().date()
@@ -231,7 +247,7 @@ def fetch_history_api(code, days=DEFAULT_HISTORY_DAYS):
     rows = []
     seen_dates = set()
     page = 1
-    page_size = 100
+    page_size = 20
     total_count = None
     while total_count is None or (page - 1) * page_size < total_count:
         params = {
@@ -255,7 +271,9 @@ def fetch_history_api(code, days=DEFAULT_HISTORY_DAYS):
         time.sleep(0.06)
     if not rows:
         raise RuntimeError("fund history JSON API returned no records")
-    return sorted(rows, key=lambda x: x["date"])
+    rows = sorted(rows, key=lambda x: x["date"])
+    validate_history_coverage(rows, days)
+    return rows
 
 
 def fetch_history(code, days=DEFAULT_HISTORY_DAYS):
@@ -799,6 +817,7 @@ def summarize(rows, estimate):
     one_year_rows = rows_since_calendar_days(rows, 365)
     thirty_day_rows = rows_since_calendar_days(rows, 30)
     three_year_rows = rows_since_calendar_days(rows, 365 * 3)
+    five_year_rows = rows_since_calendar_days(rows, FIVE_YEAR_DAYS)
     ma20 = moving_average(trend_values, 20)
     ma60 = moving_average(trend_values, 60)
     summary = {
@@ -814,10 +833,13 @@ def summarize(rows, estimate):
         "return_30d": pct_change(trend_value(thirty_day_rows[0]), trend_value(latest)) if len(thirty_day_rows) > 1 else None,
         "return_1y": pct_change(trend_value(one_year_rows[0]), trend_value(latest)) if len(one_year_rows) > 1 else None,
         "return_3y": pct_change(trend_value(three_year_rows[0]), trend_value(latest)) if len(three_year_rows) > 1 else None,
+        "return_5y": pct_change(trend_value(five_year_rows[0]), trend_value(latest)) if len(five_year_rows) > 1 else None,
         "drawdown_1y": max_drawdown([trend_value(x) for x in one_year_rows]),
         "drawdown_3y": max_drawdown([trend_value(x) for x in three_year_rows]),
+        "drawdown_5y": max_drawdown([trend_value(x) for x in five_year_rows]),
         "vol_1y": annualized_volatility(one_year_rows),
         "vol_3y": annualized_volatility(three_year_rows),
+        "vol_5y": annualized_volatility(five_year_rows),
         "ma20": ma20,
         "ma60": ma60,
     }
@@ -876,8 +898,10 @@ def build_card(item, benchmarks, index):
         metric_cell("近1个月", fmt_pct(summary["return_30d"]), color_for(summary["return_30d"])),
         metric_cell("近1年", fmt_pct(summary["return_1y"]), color_for(summary["return_1y"])),
         metric_cell("近3年", fmt_pct(summary["return_3y"]), color_for(summary["return_3y"])),
+        metric_cell("近5年", fmt_pct(summary["return_5y"]), color_for(summary["return_5y"])),
         metric_cell("近1年回撤", fmt_pct(summary["drawdown_1y"], signed=False)),
         metric_cell("近3年最大回撤", fmt_pct(summary["drawdown_3y"], signed=False)),
+        metric_cell("近5年最大回撤", fmt_pct(summary["drawdown_5y"], signed=False)),
         metric_cell("年化波动率", fmt_pct(summary["vol_3y"], signed=False)),
     ]
 
@@ -885,6 +909,7 @@ def build_card(item, benchmarks, index):
     one_month_rows = rows_since_calendar_days(rows, 30)
     one_year_rows = rows_since_calendar_days(rows, 365)
     three_year_rows = rows_since_calendar_days(rows, 365 * 3)
+    five_year_rows = rows_since_calendar_days(rows, FIVE_YEAR_DAYS)
     compare_series = build_compare_series(item, benchmarks)
 
     return f"""
@@ -908,6 +933,8 @@ def build_card(item, benchmarks, index):
   {svg_line(one_year_rows, color=color, fill_id=f"fill1y{index}", full_dates=True, max_points=96)}
   <h3>近3年净值趋势图</h3>
   {svg_line(three_year_rows, color=color, fill_id=f"fill3y{index}", full_dates=True, max_points=110)}
+  <h3>近5年净值趋势图</h3>
+  {svg_line(five_year_rows, color=color, fill_id=f"fill5y{index}", full_dates=True, max_points=140)}
   <h3>回撤曲线</h3>
   {svg_multi_line([points_to_series(build_drawdown_points(three_year_rows), "回撤", "#b42318")], value_kind="pct", strong=True)}
   <h3>基金 vs 参考基准对比图</h3>
@@ -933,6 +960,7 @@ def build_report(items, benchmarks, config, market_briefing):
             f"<td>{fmt_pct(summary['return_30d'])}</td>"
             f"<td>{fmt_pct(summary['return_1y'])}</td>"
             f"<td>{fmt_pct(summary['return_3y'])}</td>"
+            f"<td>{fmt_pct(summary['return_5y'])}</td>"
             f"<td>{fmt_pct(summary['drawdown_3y'], signed=False)}</td></tr>"
         )
 
@@ -995,7 +1023,7 @@ def build_report(items, benchmarks, config, market_briefing):
   {render_market_briefing_html(market_briefing)}
   {cards}
   <table>
-    <thead><tr><th>基金</th><th>净值日</th><th>最新净值</th><th>当日涨跌</th><th>近7日</th><th>近1月</th><th>近1年</th><th>近3年</th><th>最大回撤</th></tr></thead>
+    <thead><tr><th>基金</th><th>净值日</th><th>最新净值</th><th>当日涨跌</th><th>近7日</th><th>近1月</th><th>近1年</th><th>近3年</th><th>近5年</th><th>最大回撤</th></tr></thead>
     <tbody>{''.join(data_rows)}</tbody>
   </table>
   <p class="note">说明：红色代表上涨，绿色代表下跌。主数据固定为支付宝可购买基金代码 270042（广发纳斯达克100ETF联接A）的净值/估算口径；参考基准仅用于趋势对照，不代表你的支付宝持仓数据。本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
@@ -1020,7 +1048,9 @@ def build_pushplus_report(items, benchmarks, config, market_briefing):
         one_month = fmt_pct(summary["return_30d"])
         one_year = fmt_pct(summary["return_1y"])
         three_year = fmt_pct(summary["return_3y"])
+        five_year = fmt_pct(summary["return_5y"])
         drawdown = fmt_pct(summary["drawdown_3y"], signed=False)
+        five_year_drawdown = fmt_pct(summary["drawdown_5y"], signed=False)
         vol = fmt_pct(summary["vol_3y"], signed=False)
 
         rows.append(
@@ -1031,6 +1061,7 @@ def build_pushplus_report(items, benchmarks, config, market_briefing):
             f"<td style='color:{daily_color};font-weight:700'>{daily}</td>"
             f"<td>{r7}</td>"
             f"<td>{one_year}</td>"
+            f"<td>{five_year}</td>"
             f"<td>{drawdown}</td>"
             "</tr>"
         )
@@ -1055,7 +1086,9 @@ def build_pushplus_report(items, benchmarks, config, market_briefing):
     <div><span>近1个月</span><b style="color:{color_for(summary['return_30d'])};">{one_month}</b></div>
     <div><span>近1年</span><b style="color:{color_for(summary['return_1y'])};">{one_year}</b></div>
     <div><span>近3年</span><b style="color:{color_for(summary['return_3y'])};">{three_year}</b></div>
+    <div><span>近5年</span><b style="color:{color_for(summary['return_5y'])};">{five_year}</b></div>
     <div><span>最大回撤</span><b>{drawdown}</b></div>
+    <div><span>近5年最大回撤</span><b>{five_year_drawdown}</b></div>
     <div><span>年化波动</span><b>{vol}</b></div>
   </div>
   {pushplus_chart_images(item, benchmarks)}
@@ -1112,7 +1145,7 @@ def build_pushplus_report(items, benchmarks, config, market_briefing):
     {render_market_briefing_html(market_briefing, compact=True)}
     {''.join(cards)}
     <table>
-      <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近7日</th><th>近1年</th><th>最大回撤</th></tr></thead>
+      <thead><tr><th>基金</th><th>净值日</th><th>净值</th><th>当日</th><th>近7日</th><th>近1年</th><th>近5年</th><th>最大回撤</th></tr></thead>
       <tbody>{''.join(rows)}</tbody>
     </table>
     <p class="note">主数据固定为支付宝可购买基金代码 270042（广发纳斯达克100ETF联接A）的净值/估算口径；参考基准只用于对照，不代表你的支付宝持仓。本简报仅用于定投节奏参考，不构成个性化投资建议。</p>
