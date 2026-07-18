@@ -1,100 +1,46 @@
-# 纳斯达克100基金定投日报
+# 支付宝可购买纳斯达克100场外基金日报
 
-每天生成一份面向支付宝基金口径的纳斯达克 100 QDII 基金简报，并通过 PushPlus 推送到微信。
+这是一个面向中国境内场外公募 QDII 基金的公开数据日报。它不会登录支付宝、不会读取支付宝账户，也不会把纳斯达克股票、美国 ETF 或指数当作用户直接持仓。
 
-## 当前基金口径
+默认基金清单在 [`config/funds.json`](config/funds.json)：`270042`、`000834`、`019172`。每只基金以自己的代码独立抓取净值；`platform: 支付宝（购买渠道）` 只说明购买渠道，不代表数据由支付宝提供。
 
-主数据固定使用支付宝可购买的基金：
+## 数据边界
 
-- `270042`：纳斯达克100 · 广发纳指ETF联接A（支付宝基金）
+- 正式净值：优先预留基金管理人官方源；当前默认实现使用东方财富公开接口作为第三方备用，报告会明确标记为降级数据。
+- 下一待公布净值估算：与正式净值分开显示，且始终标记为非官方、低可信度。
+- 支付宝限额、优惠费率、持仓、成本、待确认订单和实际收益：默认 `NOT_AVAILABLE` / `NOT_VERIFIED` / `MANUAL_REQUIRED`。只有用户手工填写或导入授权数据后才会显示。
+- 申购公告：只读取 `subscription_announcements` 中有来源链接、日期、份额与币种的已核验记录；没有记录时金额为 `null`，绝不把未知写成 `0`。
 
-报告里的净值、估算涨跌、近 7 日、近 1 个月、近 1 年、近 3 年、回撤等核心数据都基于这只基金。`513300` 只作为参考基准，不代表你的支付宝持仓数据，也不会把美股纳斯达克指数直接当成你的基金数据。
+完整审计、字段映射和迁移说明见 [`docs/AUDIT.md`](docs/AUDIT.md)、[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) 与 [`docs/MIGRATION.md`](docs/MIGRATION.md)。
 
-## 运行
-
-```powershell
-.\run_report.ps1
-```
-
-只生成本地报告，不推送：
+## 本地运行
 
 ```powershell
-& "C:\Users\Administrator\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" .\daily_fund_report.py --dry-run
+$env:PYTHONPATH = "src"
+python .\daily_fund_report.py --dry-run
 ```
 
-报告会保存到 `reports/` 目录。
+输出：
 
-## 现在支持的内容
+- `reports/fund-report-YYYY-MM-DD.html`：完整移动端 HTML；
+- `data/latest.json`：版本化最新快照；
+- `data/history.json`：按 `fund_code + data_type + data_date + source_name` 幂等保存的公开净值历史。
 
-- 独立的当日涨跌展示区：红色代表上涨，绿色代表下跌
-- 近 7 个净值日收益率
-- 近 1 个月收益率
-- 近 1 年收益率
-- 近 3 年收益率
-- 近 1 年回撤和近 3 年最大回撤
-- 年化波动率
-- 近 7 个净值日趋势图
-- 近 7 个净值日涨跌柱状图
-- 近 1 个月净值趋势图
-- 近 1 年净值趋势图
-- 近 3 年净值趋势图
-- 加粗后的回撤曲线
-- 基金 vs 参考基准对比图
-- AI 市场解读：结合基金指标、纳指 100 ETF 代理、利率、汇率和近 24 小时市场新闻线索生成开头摘要
-- AI 服务不可用时自动降级为规则化摘要，日报仍会正常发送
+发送前请通过环境变量配置令牌，而不是提交到仓库：
 
-## 修改基金代码
+```powershell
+$env:PUSHPLUS_TOKEN = "..."
+python .\daily_fund_report.py --send --force-send
+```
 
-编辑 `config.json` 或 `config.local.json` 的 `funds`：
+## GitHub Actions
 
-- `code`：基金代码
-- `label`：展示名称
-- `color`：图表颜色
+工作流在北京时间 11:07 和 16:17 运行。顺序是：依赖安装 → 静态检查 → 单元测试 → 抓取 → 数据验证 → 生成报告 → PushPlus → 保存公开历史。需要的唯一必需 Secret 是 `PUSHPLUS_TOKEN`。
 
-当前默认：
+手动运行时选择 `force_send=true` 可跳过时段去重。不要重跑旧版失败任务；它会使用旧提交。
 
-- `270042`：纳斯达克100 · 广发纳指ETF联接A（支付宝基金）
+## 配置个人支付宝数据
 
-## 基准配置
+仅在私有的 `config.local.json` 里填入 `manual_alipay`。公开仓库不得提交持仓、订单、截图、费用优惠或 Token。没有经过授权的支付宝接口或用户导入文件时，页面不会伪装为“已同步支付宝账户”。
 
-默认会拉取一个可投资基准代理：
-
-- `513300`：参考基准：纳斯达克100ETF
-
-如需修改，编辑配置文件中的 `benchmarks`。基准只用于趋势对照，不参与主基金净值和收益计算。
-
-## 数据口径
-
-- 基金历史净值：东方财富基金 F10 历史净值
-- 当日估算：天天基金估算接口
-- 基准对比：默认使用可投资 ETF / 联接基金代理
-
-QDII 基金通常存在净值披露延迟，简报中的“当日”更准确地说是“当前可取得的最新净值 / 估算时间”。
-
-## 云端定时推送
-
-GitHub Actions 已配置固定北京时间每天两次推送：
-
-- 11:07
-- 16:17
-
-脚本会用 `.github/fund-report-state.json` 分别记录上午和下午两个时段是否已成功推送。同一时段内多次运行时只会发送一次，上午和下午各自独发送，互不影响。
-
-如需在非定时时间立即测试或重发，可进入 Actions 页面手动触发 workflow，并勾选 `force_send` 忽略时段状态强制发送。
-
-仓库需要配置 Secret：
-
-- `PUSHPLUS_TOKEN`：你的 PushPlus token
-- `DEEPSEEK_API_KEY`：用于生成市场解读的 DeepSeek API Key
-
-AI 解读只会基于报告中的结构化数据和当天的新闻线索生成，不提供机械买卖指令；若 API、行情或新闻服务不可用，会自动使用规则化摘要，不影响日报推送。
-
-注意这里需要填 PushPlus 官网“发送消息”页面里的用户 token，不是 SecretKey。填错时脚本会明确报 `PushPlus 发送失败`，避免误以为发送成功。
-
-## 手动测试推送
-
-进入 GitHub 仓库的 Actions 页面，选择 `Daily fund report`，点击 `Run workflow`：
-
-- `force_send = false`：如果今天已经推送过，会跳过
-- `force_send = true`：忽略当天记录，强制再推送一次，适合测试新版排版
 
