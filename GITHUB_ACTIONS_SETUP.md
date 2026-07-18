@@ -1,93 +1,24 @@
-# GitHub Actions Setup
+# GitHub Actions 配置
 
-This project is already prepared for scheduled delivery through GitHub Actions.
+工作流 `.github/workflows/daily-fund-report.yml` 每天北京时间 11:07、16:17 运行，也支持手动 `workflow_dispatch`。
 
-## What is already configured
+## 必需 Secret
 
-- Workflow file: `.github/workflows/daily-fund-report.yml`
-- Schedule: every day at `11:07` and `16:17` Asia/Shanghai (staggered to avoid top-of-hour queueing)
-- Manual test trigger: `workflow_dispatch`
-- PushPlus token source: GitHub Actions secret `PUSHPLUS_TOKEN`
+- `PUSHPLUS_TOKEN`：PushPlus 用户 token。
 
-## Files to push to GitHub
+不要配置或提交支付宝 Cookie、登录信息、个人持仓、订单截图、费率优惠或 Token。当前项目没有支付宝授权接口，也不会尝试绕过登录、验证码或风控。
 
-Push these files and folders:
+## 工作流门禁
 
-- `.github/workflows/daily-fund-report.yml`
-- `daily_fund_report.py`
-- `config.json`
-- `config.example.json`
-- `README.md`
-- `ai_market_briefing.py`
+执行顺序：安装锁定工具 → Ruff → Mypy → Pytest → 公开数据抓取与校验 → JSON Schema 校验 → PushPlus → 保存公开历史与时段状态。
 
-Do not push:
+如果抓取失败，报告会标为 `FAILED`；若只能使用第三方公开净值源，报告会标为 `DEGRADED`。PushPlus 标题会携带状态，不会把异常数据写成正常收益日报。
 
-- `config.local.json`
-- `reports/`
+## 持久化内容
 
-`config.local.json` is already ignored by `.gitignore` and should stay local because it contains your real PushPlus token.
+工作流只提交 `data/latest.json`、`data/history.json` 和 `.github/fund-report-state.json`。完整 HTML 通过 Actions Artifact 保存。`history.json` 以基金代码、数据类型、数据日期与来源名称作为唯一键，重复运行不会重复追加。
 
-## One-time setup
+## 手动发送
 
-1. Create a new GitHub repository.
-2. Push this project to that repository.
-3. In GitHub, open `Settings > Secrets and variables > Actions`.
-4. Create a new repository secret named `PUSHPLUS_TOKEN`.
-5. Paste your real PushPlus token as the secret value.
-6. Open the `Actions` tab and enable workflows if GitHub asks.
-7. Run `Daily fund report` once with `Run workflow` to verify the first delivery.
-
-## Fastest way to push
-
-After you create an empty GitHub repository, run:
-
-```powershell
-.\publish_to_github.ps1 -RemoteUrl https://github.com/YOUR_NAME/YOUR_REPO.git
-```
-
-The script will:
-
-- initialize a local git repository if needed
-- create or update remote `origin`
-- commit only the files needed for automation
-- push branch `main`
-
-## Fund configuration
-
-The workflow reads fund definitions from `config.json`.
-
-If you want to change the tracked funds, edit `config.json` before pushing:
-
-- Nasdaq 100 QDII fund code
-- labels and colors
-
-Do not store the PushPlus token in `config.json`; GitHub Actions provides it through the `PUSHPLUS_TOKEN` secret.
-
-## How it runs
-
-GitHub Actions runs:
-
-```yaml
-python daily_fund_report_runtime.py --send --twice-per-day
-```
-
-The script already supports this flow:
-
-- load fund settings from `config.json`
-- read `PUSHPLUS_TOKEN` from environment
-- fetch latest fund history and estimate data
-- use the current Eastmoney JSON history API, with the legacy API as a fallback
-- generate the HTML report
-- send the report through PushPlus
-- persist the successful morning/afternoon state in the repository
-
-## If delivery stops later
-
-Check these places first:
-
-- `Actions > Daily fund report > latest run`
-- secret `PUSHPLUS_TOKEN` still exists
-- `config.json` still contains valid fund codes
-- GitHub Actions is enabled for the repository
-- the Actions log does not report an empty fund-history response
+Actions 页选择 **Daily fund report** → **Run workflow** → `force_send=true`。该选项只跳过同一时段去重，不会篡改正式时段状态。
 
