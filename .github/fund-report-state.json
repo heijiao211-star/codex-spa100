@@ -5,15 +5,15 @@
     "latest_nav_date": "2026-08-06",
     "latest_nav": 8.1478
   },
-  "last_sent_date": "2026-08-10",
-  "last_sent_at": "2026-08-10T17:49:36+08:00",
+  "last_sent_date": "2026-08-11",
+  "last_sent_at": "2026-08-11T12:40:05+08:00",
   "fund_codes": [
     "270042"
   ],
   "morning": {
-    "date": "2026-08-10",
-    "sent_at": "2026-08-10T12:52:48+08:00",
-    "latest_nav_date": "2026-08-06",
-    "latest_nav": 8.1478
+    "date": "2026-08-11",
+    "sent_at": "2026-08-11T12:40:05+08:00",
+    "latest_nav_date": "2026-08-07",
+    "latest_nav": 8.2454
   }
 }
