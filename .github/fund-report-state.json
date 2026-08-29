@@ -1,12 +1,12 @@
 {
   "afternoon": {
-    "date": "2026-08-26",
-    "sent_at": "2026-08-26T17:03:34+08:00",
-    "latest_nav_date": "2026-08-24",
-    "latest_nav": 8.0412
+    "date": "2026-08-29",
+    "sent_at": "2026-08-29T18:01:56+08:00",
+    "latest_nav_date": "2026-08-27",
+    "latest_nav": 8.2095
   },
-  "last_sent_date": "2026-08-26",
-  "last_sent_at": "2026-08-26T17:03:34+08:00",
+  "last_sent_date": "2026-08-29",
+  "last_sent_at": "2026-08-29T18:01:56+08:00",
   "fund_codes": [
     "270042"
   ],
